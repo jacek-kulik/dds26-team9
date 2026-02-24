@@ -2,12 +2,13 @@ import logging
 import os
 import atexit
 import uuid
-
+import threading
 import redis
-
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
+import utils.messaging as messaging
+from utils.atomic import atomic_update
 
 DB_ERROR_STR = "DB error"
 
@@ -44,6 +45,86 @@ def get_item_from_db(item_id: str) -> StockValue | None:
         abort(400, f"Item: {item_id} not found!")
     return entry
 
+def handle_subtract(order_id: str, item_id: str, amount: int):
+    def modifier(it: StockValue):
+        new_stock = it.stock - amount
+        if new_stock < 0:
+            return None, f"Item: {item_id} out of stock!"
+        return StockValue(stock=new_stock, price=it.price), None
+
+    ok, err = atomic_update(db, item_id, StockValue, modifier)
+
+    if not ok:
+        messaging.publish("order", {
+            "action": "subtract_failed",
+            "order_id": order_id,
+            "item_id": item_id,
+            "error": err or f"Item: {item_id} not found!",
+        })
+        return
+
+    messaging.publish("order", {
+        "action": "subtract_success",
+        "order_id": order_id,
+        "item_id": item_id,
+        "quantity": str(amount),
+    })
+
+
+def handle_add(order_id: str, item_id: str, amount: int):
+    def modifier(it: StockValue):
+        return StockValue(stock=it.stock + amount, price=it.price), None
+
+    ok, err = atomic_update(db, item_id, StockValue, modifier)
+
+    if not ok:
+        messaging.publish("order", {
+            "action": "rollback_failed",
+            "order_id": order_id,
+            "item_id": item_id,
+            "error": err or f"Item: {item_id} not found!",
+        })
+        return
+
+    messaging.publish("order", {
+        "action": "rollback_success",
+        "order_id": order_id,
+        "item_id": item_id,
+    })
+
+DISPATCH = {
+    "subtract": handle_subtract,
+    "add":      handle_add,
+}
+
+
+def worker(worker_id: str):
+    messaging.ensure_group("stock")
+
+    for msg_id, data in messaging.consume("stock", worker_id):
+        action = data.get(b"action", b"").decode()
+        handler = DISPATCH.get(action)
+
+        if handler:
+            order_id = data.get(b"order_id", b"").decode()
+            item_id  = data.get(b"item_id", b"").decode()
+            amount   = int(data.get(b"amount", b"0") or b"0")
+            handler(order_id, item_id, amount)
+
+        messaging.ack("stock", msg_id)
+
+
+def start_workers(n: int = 5):
+    for i in range(n):
+        t = threading.Thread(
+            target=worker,
+            args=(f"stock-{os.getpid()}-{i}",),
+            daemon=True,
+        )
+        t.start()
+
+
+start_workers()
 
 @app.post('/item/create/<price>')
 def create_item(price: int):

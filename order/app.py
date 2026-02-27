@@ -11,11 +11,13 @@ from enum import Enum
 import redis
 import requests
 
-from msgspec import msgpack, Struct
+from msgspec import msgpack, Struct, field
 from flask import Flask, jsonify, abort, Response
 
 import utils.messaging as messaging
 from utils.atomic import atomic_update
+
+PROTOCOL = os.getenv("PROTOCOL", "SAGA")
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
@@ -39,9 +41,17 @@ atexit.register(close_db_connection)
 
 class Status(str, Enum):
     PENDING = "PENDING"
+
+    # Saga states
     SUBTRACTING = "SUBTRACTING"
     PAYING = "PAYING"
     ROLLING_BACK = "ROLLING_BACK"
+
+    # 2PC states
+    PREPARING = "PREPARING"
+    COMMITTING = "COMMITTING"
+    ABORTING = "ABORTING"
+
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -51,10 +61,18 @@ class OrderValue(Struct):
     user_id: str
     total_cost: int
     status: str = Status.PENDING
+
+    # Saga fields
     items_pending: int = 0
-    items_confirmed: list[tuple[str, int]] = []
+    items_confirmed: list[tuple[str, int]] = field(default_factory=list)
     rollback_pending: int = 0
     error: str = ""
+
+    # 2PC fields
+    votes_yes: list[str] = field(default_factory=list)
+    decision: str = ""   # COMMIT or ABORT
+    acks: list[str] = field(default_factory=list)
+    expected_participants: int = 2
 
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
@@ -190,6 +208,86 @@ def on_rollback_failed(order_id: str, error: str):
     app.logger.error(f"Rollback failed for {order_id}: {error}")
     on_rollback_success(order_id)
 
+def on_vote_yes(order_id: str, who: str):
+    send_commit = False
+
+    def modifier(order: OrderValue):
+        if order.decision != "":
+            return order, "ok"
+
+        nonlocal send_commit
+        if who not in order.votes_yes:
+            order.votes_yes.append(who)
+
+        if len(order.votes_yes) == order.expected_participants and order.decision == "":
+            order.decision = "COMMIT"
+            order.status = Status.COMMITTING
+            send_commit = True
+        return order, "ok"
+
+    atomic_update(db, order_id, OrderValue, modifier)
+
+    if send_commit:
+        messaging.publish("stock", {"action":"stock_commit", "order_id":order_id})
+        messaging.publish("payment", {"action":"payment_commit", "order_id":order_id})
+
+
+def on_vote_no(order_id: str, who: str):
+    send_abort = False
+
+    def modifier(order: OrderValue):
+        if order.decision != "":
+            return order, "ok"
+
+        nonlocal send_abort
+        order.decision = "ABORT"
+        order.status = Status.ABORTING
+        send_abort = True
+        return order, "ok"
+
+    atomic_update(db, order_id, OrderValue, modifier)
+
+    if send_abort:
+        messaging.publish("stock", {"action":"stock_abort", "order_id":order_id})
+        messaging.publish("payment", {"action":"payment_abort", "order_id":order_id})
+
+
+def on_commit_ack(order_id: str, who: str):
+    finish = False
+
+    def modifier(order: OrderValue):
+        if order.status in (Status.COMPLETED, Status.FAILED):
+            return order, "ok"
+
+        nonlocal finish
+        if who not in order.acks:
+            order.acks.append(who)
+        if len(order.acks) == order.expected_participants:
+            order.status = Status.COMPLETED
+            order.paid = True
+            finish = True
+        return order, "ok"
+
+    atomic_update(db, order_id, OrderValue, modifier)
+
+
+def on_abort_ack(order_id: str, who: str):
+    finish = False
+
+    def modifier(order: OrderValue):
+        if order.status in (Status.COMPLETED, Status.FAILED):
+            return order, "ok"
+
+        nonlocal finish
+        if who not in order.acks:
+            order.acks.append(who)
+        if len(order.acks) == order.expected_participants:
+            order.status = Status.FAILED
+            finish = True
+        return order, "ok"
+
+    atomic_update(db, order_id, OrderValue, modifier)
+
 DISPATCH = {
     "subtract_success": on_subtract_success,
     "subtract_failed":  on_subtract_failed,
@@ -197,31 +295,77 @@ DISPATCH = {
     "pay_failed":       on_pay_failed,
     "rollback_success": on_rollback_success,
     "rollback_failed":  on_rollback_failed,
+    "vote_yes": on_vote_yes,
+    "vote_no": on_vote_no,
+    "commit_ack": on_commit_ack,
+    "abort_ack": on_abort_ack,
 }
 
 def worker(worker_id: str):
     messaging.ensure_group("order")
     for msg_id, data in messaging.consume("order", worker_id):
-        action = data.get(b"action", b"").decode()
-        handler = DISPATCH.get(action)
-        if handler:
-            order_id = data[b"order_id"].decode()
-            if action == "subtract_success":
-                handler(order_id, data[b"item_id"].decode(), int(data.get(b"quantity", b"0")))
-            elif action == "subtract_failed":
-                handler(order_id, data.get(b"error", b"").decode())
-            elif action in ("pay_success", "rollback_success"):
-                handler(order_id)
-            elif action in ("pay_failed", "rollback_failed"):
-                handler(order_id, data.get(b"error", b"").decode())
-        messaging.ack("order", msg_id)
+        try:
+            action = data.get(b"action", b"").decode()
+            handler = DISPATCH.get(action)
+            if handler:
+                order_id = data[b"order_id"].decode()
+                if action == "subtract_success":
+                    handler(order_id, data[b"item_id"].decode(), int(data.get(b"quantity", b"0")))
+                elif action == "subtract_failed":
+                    handler(order_id, data.get(b"error", b"").decode())
+                elif action in ("pay_success", "rollback_success"):
+                    handler(order_id)
+                elif action in ("pay_failed", "rollback_failed"):
+                    handler(order_id, data.get(b"error", b"").decode())
+                elif action in ("vote_yes", "vote_no", "commit_ack", "abort_ack"):
+                    handler(order_id, data[b"who"].decode())
+            messaging.ack("order", msg_id)
+        except Exception as e:
+            app.logger.exception(f"Worker error: {e}")
 
 def start_workers(n: int = 5):
     for i in range(n):
         t = threading.Thread(target=worker, args=(f"order-{os.getpid()}-{i}",), daemon=True)
         t.start()
 
+def recover_incomplete_2pc():
+    for key in db.scan_iter():
+        raw = db.get(key)
+        if not raw:
+            continue
+
+        try:
+            order = msgpack.decode(raw, type=OrderValue)
+        except Exception:
+            continue
+
+        # Recover COMMIT
+        if order.decision == "COMMIT" and order.status != Status.COMPLETED:
+            app.logger.info(f"Recovering COMMIT for {key}")
+            messaging.publish("stock", {
+                "action": "stock_commit",
+                "order_id": key
+            })
+            messaging.publish("payment", {
+                "action": "payment_commit",
+                "order_id": key
+            })
+
+        # Recover ABORT
+        if order.decision == "ABORT" and order.status != Status.FAILED:
+            app.logger.info(f"Recovering ABORT for {key}")
+            messaging.publish("stock", {
+                "action": "stock_abort",
+                "order_id": key
+            })
+            messaging.publish("payment", {
+                "action": "payment_abort",
+                "order_id": key
+            })
+
 start_workers()
+if PROTOCOL == "2PC":
+    recover_incomplete_2pc()
 
 @app.post('/create/<user_id>')
 def create_order(user_id: str):
@@ -294,9 +438,14 @@ def add_item(order_id: str, item_id: str, quantity: int):
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {new_total}",
                     status=200)
 
-
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
+    if PROTOCOL == "SAGA":
+        return saga_checkout(order_id)
+    else:
+        return two_pc_checkout(order_id)
+
+def saga_checkout(order_id: str):
     order_entry = get_order_from_db(order_id)
     if order_entry is None:
         abort(400, f"Order: {order_id} not found!")
@@ -327,7 +476,7 @@ def checkout(order_id: str):
             "amount": str(quantity),
         })
 
-    order_entry = get_order_status(order_id, timeout=10.0)
+    order_entry = get_order_status(order_id, timeout=5.0)
     if order_entry is None:
         abort(400, DB_ERROR_STR)
 
@@ -338,6 +487,42 @@ def checkout(order_id: str):
     else:
         abort(400, "Checkout timed out")
 
+def two_pc_checkout(order_id: str):
+    order_entry = get_order_from_db(order_id)
+
+    items_quantities = defaultdict(int)
+    for item_id, quantity in order_entry.items:
+        items_quantities[item_id] += quantity
+    items = list(items_quantities.items())
+
+    def modifier(order: OrderValue):
+        order.status = Status.PREPARING
+        order.votes_yes.clear()
+        order.decision = ""
+        order.acks.clear()
+        return order, "ok"
+
+    atomic_update(db, order_id, OrderValue, modifier)
+
+    messaging.publish("stock", {
+        "action": "stock_prepare",
+        "order_id": order_id,
+        "items": msgpack.encode(items),
+    })
+
+    messaging.publish("payment", {
+        "action": "payment_prepare",
+        "order_id": order_id,
+        "user_id": order_entry.user_id,
+        "amount": str(order_entry.total_cost)
+    })
+
+    order_entry = get_order_status(order_id, timeout=5.0)
+
+    if order_entry.status == Status.COMPLETED:
+        return Response("2PC checkout successful", 200)
+    else:
+        return Response("2PC checkout failed", 400)
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

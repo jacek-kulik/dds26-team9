@@ -17,7 +17,7 @@ ITEM_PRICE = 1
 NUMBER_OF_USERS = 1000
 USER_STARTING_CREDIT = 1
 
-with open(os.path.join('..', 'urls.json')) as f:
+with open(os.path.join('../..', 'urls.json')) as f:
     urls = json.load(f)
     ORDER_URL = urls['ORDER_URL']
     PAYMENT_URL = urls['PAYMENT_URL']

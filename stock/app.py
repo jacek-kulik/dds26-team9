@@ -31,6 +31,9 @@ class StockValue(Struct):
     stock: int
     price: int
 
+class StockTx(Struct):
+    items: list[tuple[str, int]]
+    state: str  # PREPARED | COMMITTED | ABORTED
 
 def get_item_from_db(item_id: str) -> StockValue | None:
     # get serialized data
@@ -92,9 +95,102 @@ def handle_add(order_id: str, item_id: str, amount: int):
         "item_id": item_id,
     })
 
+def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
+    tx_key = f"tx:{order_id}"
+
+    raw = db.get(tx_key)
+    if raw:
+        tx = msgpack.decode(raw, type=StockTx)
+        if tx.state in ("PREPARED", "COMMITTED"):
+            messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+            return
+        if tx.state == "ABORTED":
+            messaging.publish("order", {"action": "vote_no", "order_id": order_id, "who": "stock"})
+            return
+
+    # try subtract all; if partial success, undo
+    subtracted: list[tuple[str, int]] = []
+
+    for item_id, amount in items:
+        def modifier(it: StockValue):
+            new_stock = it.stock - int(amount)
+            if new_stock < 0:
+                return None, "out_of_stock"
+            return StockValue(stock=new_stock, price=it.price), None
+
+        ok, err = atomic_update(db, item_id, StockValue, modifier)
+        if not ok:
+            # rollback already subtracted
+            for rb_item, rb_amt in subtracted:
+                def rb_mod(it: StockValue):
+                    return StockValue(stock=it.stock + int(rb_amt), price=it.price), None
+                atomic_update(db, rb_item, StockValue, rb_mod)
+
+            db.set(tx_key, msgpack.encode(StockTx(items=items, state="ABORTED")))
+            messaging.publish("order", {"action": "vote_no", "order_id": order_id, "who": "stock"})
+            return
+
+        subtracted.append((item_id, int(amount)))
+
+    # all good
+    db.set(tx_key, msgpack.encode(StockTx(items=items, state="PREPARED")))
+    messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+
+
+def handle_stock_commit(order_id: str):
+    tx_key = f"tx:{order_id}"
+    raw = db.get(tx_key)
+    if not raw:
+        return
+
+    tx = msgpack.decode(raw, type=StockTx)
+
+    if tx.state == "COMMITTED":
+        messaging.publish("order", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
+        return
+
+    if tx.state != "PREPARED":
+        return
+
+    tx.state = "COMMITTED"
+    db.set(tx_key, msgpack.encode(tx))
+
+    messaging.publish("order", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
+
+
+def handle_stock_abort(order_id: str):
+    tx_key = f"tx:{order_id}"
+    raw = db.get(tx_key)
+    if not raw:
+        return
+
+    tx = msgpack.decode(raw, type=StockTx)
+
+    if tx.state == "ABORTED":
+        messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        return
+
+    if tx.state != "PREPARED":
+        return
+
+    # undo the subtracts
+    for item_id, amount in tx.items:
+        def modifier(it: StockValue):
+            return StockValue(stock=it.stock + int(amount), price=it.price), None
+        atomic_update(db, item_id, StockValue, modifier)
+
+    tx.state = "ABORTED"
+    db.set(tx_key, msgpack.encode(tx))
+
+    messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+
+
 DISPATCH = {
     "subtract": handle_subtract,
     "add":      handle_add,
+    "stock_prepare": handle_stock_prepare,
+    "stock_commit":  handle_stock_commit,
+    "stock_abort":   handle_stock_abort,
 }
 
 
@@ -102,16 +198,31 @@ def worker(worker_id: str):
     messaging.ensure_group("stock")
 
     for msg_id, data in messaging.consume("stock", worker_id):
-        action = data.get(b"action", b"").decode()
-        handler = DISPATCH.get(action)
+        try:
+            action = data.get(b"action", b"").decode()
+            handler = DISPATCH.get(action)
 
-        if handler:
-            order_id = data.get(b"order_id", b"").decode()
-            item_id  = data.get(b"item_id", b"").decode()
-            amount   = int(data.get(b"amount", b"0") or b"0")
-            handler(order_id, item_id, amount)
+            if handler:
+                if action == "stock_prepare":
+                    order_id = data.get(b"order_id", b"").decode()
+                    items_raw = data.get(b"items", b"")
+                    items = msgpack.decode(items_raw)
+                    handler(order_id, items)
 
-        messaging.ack("stock", msg_id)
+                elif action in ("stock_commit", "stock_abort"):
+                    order_id = data.get(b"order_id", b"").decode()
+                    handler(order_id)
+
+                else:
+                    order_id = data.get(b"order_id", b"").decode()
+                    item_id  = data.get(b"item_id", b"").decode()
+                    amount   = int(data.get(b"amount", b"0") or b"0")
+                    handler(order_id, item_id, amount)
+
+            messaging.ack("stock", msg_id)
+
+        except Exception as e:
+            app.logger.exception(f"Worker error: {e}")
 
 
 def start_workers(n: int = 5):

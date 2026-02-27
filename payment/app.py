@@ -30,6 +30,11 @@ atexit.register(close_db_connection)
 class UserValue(Struct):
     credit: int
 
+class PaymentTx(Struct):
+    user_id: str
+    amount: int
+    state: str   # PREPARED | COMMITTED | ABORTED
+
 
 def get_user_from_db(user_id: str) -> UserValue | None:
     try:
@@ -79,25 +84,154 @@ def handle_refund(order_id: str, user_id: str, amount: int):
         return
     messaging.publish("order", {"action": "refund_success", "order_id": order_id})
 
+def handle_prepare(order_id: str, user_id: str, amount: int):
+    tx_key = f"tx:{order_id}"
+
+    # If tx already exists → idempotent behavior
+    raw = db.get(tx_key)
+    if raw:
+        tx = msgpack.decode(raw, type=PaymentTx)
+
+        if tx.state == "PREPARED":
+            messaging.publish("order", {
+                "action": "vote_yes",
+                "order_id": order_id,
+                "who": "payment"
+            })
+            return
+
+        if tx.state == "COMMITTED":
+            messaging.publish("order", {
+                "action": "vote_yes",
+                "order_id": order_id,
+                "who": "payment"
+            })
+            return
+
+        if tx.state == "ABORTED":
+            messaging.publish("order", {
+                "action": "vote_no",
+                "order_id": order_id,
+                "who": "payment"
+            })
+            return
+
+    # Check credit WITHOUT modifying
+    user = get_user_from_db(user_id)
+
+    if user.credit < amount:
+        messaging.publish("order", {
+            "action": "vote_no",
+            "order_id": order_id,
+            "who": "payment"
+        })
+        return
+
+    # Store PREPARED state
+    db.set(tx_key, msgpack.encode(
+        PaymentTx(user_id=user_id, amount=amount, state="PREPARED")
+    ))
+
+    messaging.publish("order", {
+        "action": "vote_yes",
+        "order_id": order_id,
+        "who": "payment"
+    })
+
+def handle_commit(order_id: str):
+    tx_key = f"tx:{order_id}"
+    raw = db.get(tx_key)
+
+    if not raw:
+        return
+
+    tx = msgpack.decode(raw, type=PaymentTx)
+
+    if tx.state == "COMMITTED":
+        messaging.publish("order", {
+            "action": "commit_ack",
+            "order_id": order_id,
+            "who": "payment"
+        })
+        return
+
+    if tx.state != "PREPARED":
+        return
+
+    def modifier(u: UserValue):
+        return UserValue(credit=u.credit - tx.amount), None
+
+    atomic_update(db, tx.user_id, UserValue, modifier)
+
+    tx.state = "COMMITTED"
+    db.set(tx_key, msgpack.encode(tx))
+
+    messaging.publish("order", {
+        "action": "commit_ack",
+        "order_id": order_id,
+        "who": "payment"
+    })
+
+def handle_abort(order_id: str):
+    tx_key = f"tx:{order_id}"
+    raw = db.get(tx_key)
+
+    if not raw:
+        return
+
+    tx = msgpack.decode(raw, type=PaymentTx)
+
+    if tx.state == "ABORTED":
+        messaging.publish("order", {
+            "action": "abort_ack",
+            "order_id": order_id,
+            "who": "payment"
+        })
+        return
+
+    tx.state = "ABORTED"
+    db.set(tx_key, msgpack.encode(tx))
+
+    messaging.publish("order", {
+        "action": "abort_ack",
+        "order_id": order_id,
+        "who": "payment"
+    })
+
 DISPATCH = {
     "pay":    handle_pay,
     "refund": handle_refund,
+    "payment_prepare": handle_prepare,
+    "payment_commit": handle_commit,
+    "payment_abort": handle_abort,
 }
 
 def worker(worker_id: str):
     messaging.ensure_group("payment")
 
     for msg_id, data in messaging.consume("payment", worker_id):
-        action = data.get(b"action", b"").decode()
-        handler = DISPATCH.get(action)
+        try:
+            action = data.get(b"action", b"").decode()
+            handler = DISPATCH.get(action)
 
-        if handler:
-            order_id = data.get(b"order_id", b"").decode()
-            user_id  = data.get(b"user_id", b"").decode()
-            amount   = int(data.get(b"amount", b"0") or b"0")
-            handler(order_id, user_id, amount)
+            if handler:
+                order_id = data.get(b"order_id", b"").decode()
+                user_id  = data.get(b"user_id", b"").decode()
+                amount   = int(data.get(b"amount", b"0") or b"0")
 
-        messaging.ack("payment", msg_id)
+                if action == "payment_prepare":
+                    handler(order_id, user_id, amount)
+                elif action == "payment_commit":
+                    handler(order_id)
+                elif action == "payment_abort":
+                    handler(order_id)
+                else:
+                    handler(order_id, user_id, amount)
+
+            messaging.ack("payment", msg_id)
+
+        except Exception as e:
+            app.logger.exception(f"Worker error: {e}")
 
 
 def start_workers(n: int = 5):

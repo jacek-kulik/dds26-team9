@@ -34,6 +34,12 @@ logger.info("Starting the load test...")
 asyncio.run(stress(item_ids, user_ids))
 logger.info("Load test completed")
 
+# Wait for in-flight saga compensating transactions (rollbacks, refunds) to settle
+logger.info("Waiting for sagas to settle...")
+import time
+time.sleep(5)
+logger.info("Settlement period complete")
+
 # Verify the systems' consistency
 logger.info("Starting the consistency evaluation...")
 asyncio.run(verify_systems_consistency(tmp_folder_path, item_ids, user_ids))

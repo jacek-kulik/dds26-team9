@@ -1,6 +1,8 @@
 import logging
 import os
 import atexit
+import signal
+import time
 import uuid
 import threading
 import redis
@@ -14,10 +16,39 @@ DB_ERROR_STR = "DB error"
 
 app = Flask("payment-service")
 
-db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
-                              port=int(os.environ['REDIS_PORT']),
-                              password=os.environ['REDIS_PASSWORD'],
-                              db=int(os.environ['REDIS_DB']))
+
+def _make_redis_client(host_var='REDIS_HOST', port_var='REDIS_PORT',
+                       password_var='REDIS_PASSWORD', db_var='REDIS_DB',
+                       sentinel_host_var='REDIS_SENTINEL_HOST',
+                       sentinel_port_var='REDIS_SENTINEL_PORT',
+                       sentinel_master_var='REDIS_SENTINEL_MASTER') -> redis.Redis:
+    sentinel_host = os.environ.get(sentinel_host_var)
+    if sentinel_host:
+        sentinel_port = int(os.environ.get(sentinel_port_var, '26379'))
+        master_name = os.environ.get(sentinel_master_var, 'mymaster')
+        password = os.environ.get(password_var, '')
+        db_num = int(os.environ.get(db_var, '0'))
+        sentinel = redis.Sentinel(
+            [(sentinel_host, sentinel_port)],
+            sentinel_kwargs={'password': password},
+            password=password,
+            db=db_num,
+            socket_timeout=5,
+            retry_on_timeout=True,
+        )
+        return sentinel.master_for(master_name)
+    else:
+        return redis.Redis(
+            host=os.environ[host_var],
+            port=int(os.environ[port_var]),
+            password=os.environ[password_var],
+            db=int(os.environ[db_var]),
+            socket_timeout=5,
+            retry_on_timeout=True,
+        )
+
+
+db = _make_redis_client()
 
 
 def close_db_connection():
@@ -34,6 +65,7 @@ class PaymentTx(Struct):
     user_id: str
     amount: int
     state: str   # PREPARED | COMMITTED | ABORTED
+    created_ts: float = 0.0
 
 
 def get_user_from_db(user_id: str) -> UserValue | None:
@@ -129,7 +161,7 @@ def handle_prepare(order_id: str, user_id: str, amount: int):
 
     # Store PREPARED state
     db.set(tx_key, msgpack.encode(
-        PaymentTx(user_id=user_id, amount=amount, state="PREPARED")
+        PaymentTx(user_id=user_id, amount=amount, state="PREPARED", created_ts=time.time())
     ))
 
     messaging.publish("order", {
@@ -234,7 +266,9 @@ def worker(worker_id: str):
             app.logger.exception(f"Worker error: {e}")
 
 
-def start_workers(n: int = 5):
+_worker_threads: list[threading.Thread] = []
+
+def start_workers(n: int = 2):
     for i in range(n):
         t = threading.Thread(
             target=worker,
@@ -242,9 +276,110 @@ def start_workers(n: int = 5):
             daemon=True,
         )
         t.start()
+        _worker_threads.append(t)
 
+
+WORKER_DRAIN_TIMEOUT = 10  # seconds to wait for workers to finish current message
+
+
+def _graceful_shutdown(signum, frame):
+    """Called on SIGTERM — drain message workers, then let gunicorn finish HTTP requests."""
+    messaging.request_shutdown()
+    for t in _worker_threads:
+        t.join(timeout=WORKER_DRAIN_TIMEOUT)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+
+# --- Stale tx: key cleanup ---------------------------------------------------
+TX_PREPARED_TIMEOUT = 60       # seconds before a PREPARED tx is considered stuck
+TX_TERMINAL_TTL     = 300      # seconds before a COMMITTED/ABORTED tx key is deleted
+TX_CLEANUP_INTERVAL = 15       # seconds between cleanup sweeps
+
+
+def _cleanup_stale_tx():
+    """Periodically clean up stale 2PC transaction keys.
+
+    • PREPARED keys older than TX_PREPARED_TIMEOUT: mark ABORTED.
+      (Payment only checks credit at prepare time — nothing was deducted,
+       so no rollback is needed.)
+    • COMMITTED / ABORTED keys older than TX_TERMINAL_TTL: delete them
+      (no longer needed for idempotency).
+    """
+    time.sleep(10)  # let workers boot first
+
+    while not messaging.is_shutting_down():
+        try:
+            lock = db.lock("payment_tx_cleanup_lock", timeout=30)
+            if not lock.acquire(blocking=False):
+                time.sleep(TX_CLEANUP_INTERVAL)
+                continue
+
+            try:
+                now = time.time()
+                cleaned = 0
+
+                for key in db.scan_iter(match="tx:*"):
+                    if db.type(key) != b"string":
+                        continue
+
+                    raw = db.get(key)
+                    if not raw:
+                        continue
+
+                    try:
+                        tx = msgpack.decode(raw, type=PaymentTx)
+                    except Exception:
+                        continue
+
+                    age = now - tx.created_ts if tx.created_ts > 0 else float('inf')
+
+                    if tx.state == "PREPARED" and age > TX_PREPARED_TIMEOUT:
+                        tx.state = "ABORTED"
+                        tx.created_ts = now
+                        db.set(key, msgpack.encode(tx))
+
+                        app.logger.info(f"Stale tx cleanup: aborted PREPARED tx {key} "
+                                        f"(age {age:.0f}s)")
+                        cleaned += 1
+
+                    elif tx.state in ("COMMITTED", "ABORTED") and age > TX_TERMINAL_TTL:
+                        db.delete(key)
+                        app.logger.debug(f"Stale tx cleanup: deleted terminal tx {key} "
+                                         f"(state={tx.state}, age {age:.0f}s)")
+                        cleaned += 1
+
+                if cleaned > 0:
+                    app.logger.info(f"Stale tx cleanup pass: {cleaned} key(s) cleaned")
+
+            finally:
+                try:
+                    lock.release()
+                except redis.exceptions.LockError:
+                    pass
+
+        except Exception as e:
+            app.logger.exception(f"Stale tx cleanup error: {e}")
+
+        time.sleep(TX_CLEANUP_INTERVAL)
+
+
+threading.Thread(target=_cleanup_stale_tx, daemon=True).start()
 
 start_workers()
+
+
+@app.get('/health')
+def health():
+    try:
+        db.ping()
+        return jsonify({"status": "ok"}), 200
+    except redis.exceptions.RedisError:
+        return jsonify({"status": "unhealthy"}), 503
+
 
 @app.post('/create_user')
 def create_user():
@@ -283,29 +418,32 @@ def find_user(user_id: str):
 
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit += int(amount)
-    try:
-        db.set(user_id, msgpack.encode(user_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    def modifier(user: UserValue):
+        new_credit = user.credit + int(amount)
+        return UserValue(credit=new_credit), new_credit
+
+    success, new_credit = atomic_update(db, user_id, UserValue, modifier)
+    if not success:
+        abort(400, f"User: {user_id} not found!")
+    return Response(f"User: {user_id} credit updated to: {new_credit}", status=200)
 
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
-        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
-    try:
-        db.set(user_id, msgpack.encode(user_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+
+    def modifier(user: UserValue):
+        new_credit = user.credit - int(amount)
+        if new_credit < 0:
+            return None, f"User: {user_id} credit cannot get reduced below zero!"
+        return UserValue(credit=new_credit), new_credit
+
+    success, result = atomic_update(db, user_id, UserValue, modifier)
+    if not success:
+        if result:
+            abort(400, result)
+        abort(400, f"User: {user_id} not found!")
+    return Response(f"User: {user_id} credit updated to: {result}", status=200)
 
 
 if __name__ == '__main__':

@@ -16,7 +16,7 @@ kind: Deployment
 metadata:
   name: order-deployment
 spec:
-  replicas: 1
+  replicas: 4
   selector:
     matchLabels:
       component: order
@@ -25,9 +25,11 @@ spec:
       labels:
         component: order
     spec:
+      terminationGracePeriodSeconds: 45
       containers:
         - name: order
           image: order:latest
+          imagePullPolicy: Never
           resources:
             limits:
               memory: "1Gi"
@@ -36,19 +38,63 @@ spec:
               memory: "1Gi"
               cpu: "1"
           command: ["gunicorn"]
-          args: ["-b", "0.0.0.0:5000", "app:app"]
+          args: ["-b", "0.0.0.0:5000", "-w", "4", "--threads=20", "--timeout", "30", "--graceful-timeout", "30", "--log-level=info", "app:app"]
           ports:
             - containerPort: 5000
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
           env:
             - name: USER_SERVICE_URL
               value: "user-service"
             - name: STOCK_SERVICE_URL
               value: "stock-service"
+            - name: GATEWAY_URL
+              value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+            - name: PROTOCOL
+              value: "SAGA"
+            - name: SERVICE_NAME
+              value: "order"
             - name: REDIS_HOST
-              value: redis-master
+              value: redis-node-0.redis-headless.default.svc.cluster.local
             - name: REDIS_PORT
               value: '6379'
             - name: REDIS_PASSWORD
               value: "redis"
             - name: REDIS_DB
               value: "0"
+            - name: REDIS_SENTINEL_HOST
+              value: redis.default.svc.cluster.local
+            - name: REDIS_SENTINEL_PORT
+              value: '26379'
+            - name: REDIS_SENTINEL_MASTER
+              value: "mymaster"
+            - name: BUS_REDIS_HOST
+              value: redis-node-0.redis-headless.default.svc.cluster.local
+            - name: BUS_REDIS_PORT
+              value: '6379'
+            - name: BUS_REDIS_PASSWORD
+              value: "redis"
+            - name: BUS_REDIS_DB
+              value: "3"
+            - name: BUS_REDIS_SENTINEL_HOST
+              value: redis.default.svc.cluster.local
+            - name: BUS_REDIS_SENTINEL_PORT
+              value: '26379'
+            - name: BUS_REDIS_SENTINEL_MASTER
+              value: "mymaster"

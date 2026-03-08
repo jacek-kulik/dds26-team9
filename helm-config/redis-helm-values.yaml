@@ -1,17 +1,30 @@
 auth:
   password: redis
+
+sentinel:
+  enabled: true
+  masterSet: mymaster
+  quorum: 2
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+
 master:
   persistence:
+    enabled: true
     size: 4Gi
   resources:
     requests:
-      memory: 4Gi
-      cpu: 2
+      memory: 512Mi
+      cpu: 250m
+
 replica:
-  replicaCount: 1
+  replicaCount: 3
   persistence:
+    enabled: true
     size: 4Gi
   resources:
     requests:
-      memory: 4Gi
-      cpu: 2
+      memory: 512Mi
+      cpu: 250m

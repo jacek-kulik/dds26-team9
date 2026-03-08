@@ -2,6 +2,7 @@ import logging
 import os
 import atexit
 import random
+import signal
 import time
 import uuid
 import threading
@@ -26,10 +27,41 @@ GATEWAY_URL = os.environ['GATEWAY_URL']
 
 app = Flask("order-service")
 
-db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
-                              port=int(os.environ['REDIS_PORT']),
-                              password=os.environ['REDIS_PASSWORD'],
-                              db=int(os.environ['REDIS_DB']))
+
+def _make_redis_client(host_var='REDIS_HOST', port_var='REDIS_PORT',
+                       password_var='REDIS_PASSWORD', db_var='REDIS_DB',
+                       sentinel_host_var='REDIS_SENTINEL_HOST',
+                       sentinel_port_var='REDIS_SENTINEL_PORT',
+                       sentinel_master_var='REDIS_SENTINEL_MASTER') -> redis.Redis:
+    """Create a Redis client. Uses Sentinel if REDIS_SENTINEL_HOST is set,
+    otherwise falls back to a direct connection."""
+    sentinel_host = os.environ.get(sentinel_host_var)
+    if sentinel_host:
+        sentinel_port = int(os.environ.get(sentinel_port_var, '26379'))
+        master_name = os.environ.get(sentinel_master_var, 'mymaster')
+        password = os.environ.get(password_var, '')
+        db_num = int(os.environ.get(db_var, '0'))
+        sentinel = redis.Sentinel(
+            [(sentinel_host, sentinel_port)],
+            sentinel_kwargs={'password': password},
+            password=password,
+            db=db_num,
+            socket_timeout=5,
+            retry_on_timeout=True,
+        )
+        return sentinel.master_for(master_name)
+    else:
+        return redis.Redis(
+            host=os.environ[host_var],
+            port=int(os.environ[port_var]),
+            password=os.environ[password_var],
+            db=int(os.environ[db_var]),
+            socket_timeout=5,
+            retry_on_timeout=True,
+        )
+
+
+db = _make_redis_client()
 
 
 def close_db_connection():
@@ -68,6 +100,9 @@ class OrderValue(Struct):
     rollback_pending: int = 0
     error: str = ""
 
+    # Timestamp (epoch) of last status change — used by recovery
+    status_ts: float = 0.0
+
     # 2PC fields
     votes_yes: list[str] = field(default_factory=list)
     decision: str = ""   # COMMIT or ABORT
@@ -100,15 +135,31 @@ def get_order_status(order_id: str, timeout: float = 10.0, interval: float = 0.0
 
 def on_subtract_success(order_id: str, item_id: str, quantity: int):
     should_pay = False
+    should_rollback = False
     pay_user_id = ""
     pay_amount = 0
 
     def modifier(order: OrderValue):
-        nonlocal should_pay, pay_user_id, pay_amount
+        nonlocal should_pay, should_rollback, pay_user_id, pay_amount
+
+        # If the order is already rolling back or failed, we need to undo this
+        # successful subtract since another item's subtract failed first.
+        if order.status in (Status.ROLLING_BACK, Status.FAILED):
+            order.items_confirmed.append((item_id, quantity))
+            order.rollback_pending += 1
+            should_rollback = True
+            # If it was already FAILED (no items to roll back before),
+            # move it back to ROLLING_BACK
+            if order.status == Status.FAILED:
+                order.status = Status.ROLLING_BACK
+                order.status_ts = time.time()
+            return order, "ok"
+
         order.items_pending -= 1
         order.items_confirmed.append((item_id, quantity))
         if order.items_pending == 0:
             order.status = Status.PAYING
+            order.status_ts = time.time()
             should_pay = True
             pay_user_id = order.user_id
             pay_amount = order.total_cost
@@ -116,7 +167,14 @@ def on_subtract_success(order_id: str, item_id: str, quantity: int):
 
     atomic_update(db, order_id, OrderValue, modifier)
 
-    if should_pay:
+    if should_rollback:
+        messaging.publish("stock", {
+            "action": "add",
+            "order_id": order_id,
+            "item_id": item_id,
+            "amount": str(quantity),
+        })
+    elif should_pay:
         messaging.publish("payment", {
             "action": "pay",
             "order_id": order_id,
@@ -130,13 +188,25 @@ def on_subtract_failed(order_id: str, error: str):
 
     def modifier(order: OrderValue):
         nonlocal rollback_items
+        if order.status in (Status.ROLLING_BACK, Status.FAILED):
+            # Already handling a failure; decrement pending count
+            order.items_pending -= 1
+            return order, "ok"
         if order.status not in (Status.SUBTRACTING, Status.PAYING):
             return None, "wrong_state"
         order.status = Status.ROLLING_BACK
+        order.status_ts = time.time()
         order.error = error
+        order.items_pending -= 1
         rollback_items = list(order.items_confirmed)
-        if not rollback_items:
+        if not rollback_items and order.items_pending == 0:
+            # No confirmed items and no more pending — we're done
             order.status = Status.FAILED
+            order.status_ts = time.time()
+        elif not rollback_items:
+            # No confirmed items yet, but some subtracts are still pending.
+            # Stay in ROLLING_BACK; on_subtract_success will handle them.
+            order.rollback_pending = 0
         else:
             order.rollback_pending = len(rollback_items)
         return order, "ok"
@@ -153,13 +223,35 @@ def on_subtract_failed(order_id: str, error: str):
 
 
 def on_pay_success(order_id: str):
+    should_refund = False
+    refund_user_id = ""
+    refund_amount = 0
+
     def modifier(order: OrderValue):
+        nonlocal should_refund, refund_user_id, refund_amount
+        # If recovery already moved this order to ROLLING_BACK or FAILED,
+        # don't mark it as COMPLETED — trigger a refund instead.
+        if order.status in (Status.ROLLING_BACK, Status.FAILED):
+            should_refund = True
+            refund_user_id = order.user_id
+            refund_amount = order.total_cost
+            return order, "ok"
         order.paid = True
         order.status = Status.COMPLETED
         return order, "ok"
 
     atomic_update(db, order_id, OrderValue, modifier)
-    app.logger.info(f"Checkout COMPLETED: {order_id}")
+
+    if should_refund:
+        messaging.publish("payment", {
+            "action": "refund",
+            "order_id": order_id,
+            "user_id": refund_user_id,
+            "amount": str(refund_amount),
+        })
+        app.logger.info(f"Late pay_success for {order_id} during rollback — refund issued")
+    else:
+        app.logger.info(f"Checkout COMPLETED: {order_id}")
 
 
 def on_pay_failed(order_id: str, error: str):
@@ -169,9 +261,11 @@ def on_pay_failed(order_id: str, error: str):
         nonlocal rollback_items
         order.error = error
         order.status = Status.ROLLING_BACK
+        order.status_ts = time.time()
         rollback_items = list(order.items_confirmed)
         if not rollback_items:
             order.status = Status.FAILED
+            order.status_ts = time.time()
         else:
             order.rollback_pending = len(rollback_items)
         return order, "ok"
@@ -323,49 +417,233 @@ def worker(worker_id: str):
         except Exception as e:
             app.logger.exception(f"Worker error: {e}")
 
-def start_workers(n: int = 5):
+_worker_threads: list[threading.Thread] = []
+
+def start_workers(n: int = 2):
     for i in range(n):
         t = threading.Thread(target=worker, args=(f"order-{os.getpid()}-{i}",), daemon=True)
         t.start()
+        _worker_threads.append(t)
+
 
 def recover_incomplete_2pc():
-    for key in db.scan_iter():
-        raw = db.get(key)
-        if not raw:
-            continue
+    # Use a Redis lock so only one replica runs recovery at a time
+    lock = db.lock("2pc_recovery_lock", timeout=30)
+    if not lock.acquire(blocking=False):
+        app.logger.info("Another replica is running 2PC recovery, skipping.")
+        return
 
+    try:
+        for key in db.scan_iter():
+            # Skip non-string keys (e.g. streams, hashes from other services)
+            if db.type(key) != b"string":
+                continue
+
+            raw = db.get(key)
+            if not raw:
+                continue
+
+            try:
+                order = msgpack.decode(raw, type=OrderValue)
+            except Exception:
+                continue
+
+            key_str = key.decode() if isinstance(key, bytes) else key
+
+            # Recover COMMIT
+            if order.decision == "COMMIT" and order.status != Status.COMPLETED:
+                app.logger.info(f"Recovering COMMIT for {key_str}")
+                messaging.publish("stock", {
+                    "action": "stock_commit",
+                    "order_id": key_str
+                })
+                messaging.publish("payment", {
+                    "action": "payment_commit",
+                    "order_id": key_str
+                })
+
+            # Recover ABORT
+            if order.decision == "ABORT" and order.status != Status.FAILED:
+                app.logger.info(f"Recovering ABORT for {key_str}")
+                messaging.publish("stock", {
+                    "action": "stock_abort",
+                    "order_id": key_str
+                })
+                messaging.publish("payment", {
+                    "action": "payment_abort",
+                    "order_id": key_str
+                })
+    finally:
         try:
-            order = msgpack.decode(raw, type=OrderValue)
-        except Exception:
-            continue
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
 
-        # Recover COMMIT
-        if order.decision == "COMMIT" and order.status != Status.COMPLETED:
-            app.logger.info(f"Recovering COMMIT for {key}")
-            messaging.publish("stock", {
-                "action": "stock_commit",
-                "order_id": key
-            })
-            messaging.publish("payment", {
-                "action": "payment_commit",
-                "order_id": key
-            })
+SAGA_RECOVERY_THRESHOLD = 15  # seconds — only recover orders stuck longer than this
 
-        # Recover ABORT
-        if order.decision == "ABORT" and order.status != Status.FAILED:
-            app.logger.info(f"Recovering ABORT for {key}")
-            messaging.publish("stock", {
-                "action": "stock_abort",
-                "order_id": key
-            })
-            messaging.publish("payment", {
-                "action": "payment_abort",
-                "order_id": key
-            })
+def recover_incomplete_saga():
+    """Periodically recover orders stuck in intermediate Saga states.
+
+    Only acts on orders whose status_ts is older than SAGA_RECOVERY_THRESHOLD,
+    ensuring in-flight messages have time to be processed first.
+    """
+    # Wait for workers to start up before first scan
+    time.sleep(5)
+
+    while not messaging.is_shutting_down():
+        try:
+            lock = db.lock("saga_recovery_lock", timeout=30)
+            if not lock.acquire(blocking=False):
+                time.sleep(10)
+                continue
+
+            try:
+                now = time.time()
+                recovered = 0
+
+                for key in db.scan_iter():
+                    if db.type(key) != b"string":
+                        continue
+
+                    raw = db.get(key)
+                    if not raw:
+                        continue
+
+                    try:
+                        order = msgpack.decode(raw, type=OrderValue)
+                    except Exception:
+                        continue
+
+                    key_str = key.decode() if isinstance(key, bytes) else key
+
+                    if order.status in (Status.COMPLETED, Status.FAILED, Status.PENDING):
+                        continue
+
+                    # Skip orders that haven't been stuck long enough —
+                    # they may still be actively processing.
+                    age = now - order.status_ts if order.status_ts > 0 else float('inf')
+                    if age < SAGA_RECOVERY_THRESHOLD:
+                        continue
+
+                    # --- SUBTRACTING ---
+                    if order.status == Status.SUBTRACTING:
+                        app.logger.info(f"Saga recovery [{key_str}]: stuck in SUBTRACTING for {age:.0f}s "
+                                        f"(pending={order.items_pending}, confirmed={len(order.items_confirmed)})")
+
+                        if order.items_confirmed:
+                            order.status = Status.ROLLING_BACK
+                            order.rollback_pending = len(order.items_confirmed)
+                            order.items_pending = 0
+                            order.error = "Recovered after timeout during subtract phase"
+                            order.status_ts = now
+                            db.set(key, msgpack.encode(order))
+
+                            for item_id, qty in order.items_confirmed:
+                                messaging.publish("stock", {
+                                    "action": "add",
+                                    "order_id": key_str,
+                                    "item_id": item_id,
+                                    "amount": str(qty),
+                                })
+                        else:
+                            order.status = Status.FAILED
+                            order.items_pending = 0
+                            order.error = "Recovered after timeout: no items were confirmed"
+                            order.status_ts = now
+                            db.set(key, msgpack.encode(order))
+
+                        recovered += 1
+
+                    # --- PAYING ---
+                    elif order.status == Status.PAYING:
+                        app.logger.info(f"Saga recovery [{key_str}]: stuck in PAYING for {age:.0f}s, "
+                                        f"rolling back {len(order.items_confirmed)} items")
+
+                        if order.items_confirmed:
+                            order.status = Status.ROLLING_BACK
+                            order.rollback_pending = len(order.items_confirmed)
+                            order.error = "Recovered after timeout during payment phase"
+                            order.status_ts = now
+                            db.set(key, msgpack.encode(order))
+
+                            for item_id, qty in order.items_confirmed:
+                                messaging.publish("stock", {
+                                    "action": "add",
+                                    "order_id": key_str,
+                                    "item_id": item_id,
+                                    "amount": str(qty),
+                                })
+                        else:
+                            order.status = Status.FAILED
+                            order.error = "Recovered after timeout during payment phase"
+                            order.status_ts = now
+                            db.set(key, msgpack.encode(order))
+
+                        recovered += 1
+
+                    # --- ROLLING_BACK ---
+                    elif order.status == Status.ROLLING_BACK:
+                        app.logger.info(f"Saga recovery [{key_str}]: stuck in ROLLING_BACK for {age:.0f}s "
+                                        f"(rollback_pending={order.rollback_pending}, "
+                                        f"confirmed={len(order.items_confirmed)})")
+
+                        if order.items_confirmed:
+                            order.rollback_pending = len(order.items_confirmed)
+                            order.status_ts = now
+                            db.set(key, msgpack.encode(order))
+
+                            for item_id, qty in order.items_confirmed:
+                                messaging.publish("stock", {
+                                    "action": "add",
+                                    "order_id": key_str,
+                                    "item_id": item_id,
+                                    "amount": str(qty),
+                                })
+                        else:
+                            order.status = Status.FAILED
+                            order.error = "Recovered after timeout: rollback had nothing to undo"
+                            order.status_ts = now
+                            db.set(key, msgpack.encode(order))
+
+                        recovered += 1
+
+                if recovered > 0:
+                    app.logger.info(f"Saga recovery pass: {recovered} orders recovered")
+
+            finally:
+                try:
+                    lock.release()
+                except redis.exceptions.LockError:
+                    pass
+
+        except Exception as e:
+            app.logger.exception(f"Saga recovery error: {e}")
+
+        # Run recovery every 10 seconds
+        time.sleep(10)
+
+
+WORKER_DRAIN_TIMEOUT = 10  # seconds to wait for workers to finish current message
+
+
+def _graceful_shutdown(signum, frame):
+    """Called on SIGTERM — drain message workers, then let gunicorn finish HTTP requests."""
+    messaging.request_shutdown()
+    for t in _worker_threads:
+        t.join(timeout=WORKER_DRAIN_TIMEOUT)
+    # Re-raise so gunicorn's own handler runs next
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
 
 start_workers()
 if PROTOCOL == "2PC":
     recover_incomplete_2pc()
+elif PROTOCOL == "SAGA":
+    threading.Thread(target=recover_incomplete_saga, daemon=True).start()
 
 @app.post('/create/<user_id>')
 def create_order(user_id: str):
@@ -376,6 +654,15 @@ def create_order(user_id: str):
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({'order_id': key})
+
+
+@app.get('/health')
+def health():
+    try:
+        db.ping()
+        return jsonify({"status": "ok"}), 200
+    except redis.exceptions.RedisError:
+        return jsonify({"status": "unhealthy"}), 503
 
 
 @app.post('/batch_init/<n>/<n_items>/<n_users>/<item_price>')
@@ -462,6 +749,7 @@ def saga_checkout(order_id: str):
         order.items_confirmed = []
         order.rollback_pending = 0
         order.error = ""
+        order.status_ts = time.time()
         return order, "ok"
 
     success, _ = atomic_update(db, order_id, OrderValue, modifier)
@@ -476,7 +764,7 @@ def saga_checkout(order_id: str):
             "amount": str(quantity),
         })
 
-    order_entry = get_order_status(order_id, timeout=5.0)
+    order_entry = get_order_status(order_id, timeout=10.0)
     if order_entry is None:
         abort(400, DB_ERROR_STR)
 
@@ -485,7 +773,60 @@ def saga_checkout(order_id: str):
     elif order_entry.status == Status.FAILED:
         return Response("Checkout failed", 400)
     else:
+        # Timed out — cancel the saga so it converges to FAILED,
+        # preventing a silent late success after we return 400.
+        _cancel_saga(order_id)
         abort(400, "Checkout timed out")
+
+
+def _cancel_saga(order_id: str):
+    """Force an in-flight saga into ROLLING_BACK / FAILED.
+
+    Called when the HTTP poll times out.  The saga callbacks already handle
+    the case where an order is in ROLLING_BACK or FAILED (they trigger
+    compensating actions), so this is safe even if messages are still in
+    flight.
+
+    NOTE: we do NOT issue a refund directly here even if the order was in
+    PAYING state.  If the payment was already deducted, the on_pay_success
+    callback will see the ROLLING_BACK state and issue the refund.  If the
+    payment failed, on_pay_failed handles rollback.  Issuing a refund here
+    would risk a double-refund race.
+    """
+    rollback_items = []
+
+    def modifier(order: OrderValue):
+        nonlocal rollback_items
+
+        # Already terminal — nothing to do
+        if order.status in (Status.COMPLETED, Status.FAILED):
+            return order, "ok"
+
+        # Already rolling back — let it finish on its own
+        if order.status == Status.ROLLING_BACK:
+            return order, "ok"
+
+        order.status = Status.ROLLING_BACK
+        order.status_ts = time.time()
+        order.error = "Cancelled: HTTP poll timed out"
+        order.items_pending = 0
+        rollback_items = list(order.items_confirmed)
+        if not rollback_items:
+            order.status = Status.FAILED
+            order.status_ts = time.time()
+        else:
+            order.rollback_pending = len(rollback_items)
+        return order, "ok"
+
+    atomic_update(db, order_id, OrderValue, modifier)
+
+    for it_id, qty in rollback_items:
+        messaging.publish("stock", {
+            "action": "add",
+            "order_id": order_id,
+            "item_id": it_id,
+            "amount": str(qty),
+        })
 
 def two_pc_checkout(order_id: str):
     order_entry = get_order_from_db(order_id)

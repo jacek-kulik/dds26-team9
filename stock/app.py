@@ -133,12 +133,13 @@ def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
     raw = db.get(tx_key)
     if raw:
         tx = msgpack.decode(raw, type=StockTx)
-        if tx.state in ("PREPARED", "COMMITTED"):
+        if tx.state == "PREPARED":
+            # Duplicate prepare for the current in-flight attempt → idempotent shortcut
             messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
             return
-        if tx.state == "ABORTED":
-            messaging.publish("order", {"action": "vote_no", "order_id": order_id, "who": "stock"})
-            return
+        # COMMITTED or ABORTED are terminal states from a *previous* checkout
+        # attempt for this order.  Delete the stale key and re-evaluate fresh.
+        db.delete(tx_key)
 
     # try subtract all; if partial success, undo
     subtracted: list[tuple[str, int]] = []
@@ -194,6 +195,9 @@ def handle_stock_abort(order_id: str):
     tx_key = f"tx:{order_id}"
     raw = db.get(tx_key)
     if not raw:
+        # No tx record — we never prepared, or the key was already cleaned up.
+        # Still acknowledge so the coordinator collects all acks.
+        messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
         return
 
     tx = msgpack.decode(raw, type=StockTx)

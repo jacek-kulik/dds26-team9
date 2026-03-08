@@ -125,6 +125,7 @@ def handle_prepare(order_id: str, user_id: str, amount: int):
         tx = msgpack.decode(raw, type=PaymentTx)
 
         if tx.state == "PREPARED":
+            # Duplicate prepare for the current in-flight attempt → idempotent shortcut
             messaging.publish("order", {
                 "action": "vote_yes",
                 "order_id": order_id,
@@ -132,21 +133,9 @@ def handle_prepare(order_id: str, user_id: str, amount: int):
             })
             return
 
-        if tx.state == "COMMITTED":
-            messaging.publish("order", {
-                "action": "vote_yes",
-                "order_id": order_id,
-                "who": "payment"
-            })
-            return
-
-        if tx.state == "ABORTED":
-            messaging.publish("order", {
-                "action": "vote_no",
-                "order_id": order_id,
-                "who": "payment"
-            })
-            return
+        # COMMITTED or ABORTED are terminal states from a *previous* checkout
+        # attempt for this order.  Delete the stale key and re-evaluate fresh.
+        db.delete(tx_key)
 
     # Check credit WITHOUT modifying
     user = get_user_from_db(user_id)
@@ -209,6 +198,13 @@ def handle_abort(order_id: str):
     raw = db.get(tx_key)
 
     if not raw:
+        # No tx record — we voted no before creating one, or it was already
+        # cleaned up.  Still acknowledge so the coordinator collects all acks.
+        messaging.publish("order", {
+            "action": "abort_ack",
+            "order_id": order_id,
+            "who": "payment"
+        })
         return
 
     tx = msgpack.decode(raw, type=PaymentTx)

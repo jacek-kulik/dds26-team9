@@ -15,7 +15,7 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
-      - PROTOCOL=2PC
+      - PROTOCOL=SAGA
     command: gunicorn -b 0.0.0.0:5000 -w 4 --threads=20 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env

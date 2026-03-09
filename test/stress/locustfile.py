@@ -1,3 +1,43 @@
+"""
+Checkout Only Load Test
+
+Purpose
+-------
+This test measures the raw performance of the distributed transaction
+implementation by executing only the checkout operation on existing orders.
+
+Each Locust user repeatedly performs:
+    POST /orders/checkout/{order_id}
+
+This isolates the critical distributed transaction path involving:
+    Order Service -> Stock Service -> Payment Service -> Redis
+
+Because orders already exist, the test removes overhead from browsing
+or order creation. This makes it ideal for comparing the efficiency of
+transaction protocols such as Saga and Two-Phase Commit (2PC).
+
+What this test reveals
+----------------------
+- Maximum checkout throughput
+- Transaction latency
+- Overhead introduced by distributed coordination
+- Performance difference between Saga and 2PC
+
+Typical run configurations
+--------------------------
+
+Moderate load
+locust -f checkout_only.py --users 300 --spawn-rate 50 --run-time 2m --headless
+
+Stress test
+locust -f checkout_only.py --users 1500 --spawn-rate 200 --run-time 2m --headless
+
+Why run this test
+-----------------
+This is the most direct comparison of Saga vs 2PC because the workload
+consists only of distributed transactions without additional system noise.
+"""
+
 import os.path
 import random
 import json

@@ -776,6 +776,16 @@ def saga_checkout(order_id: str):
         # Timed out — cancel the saga so it converges to FAILED,
         # preventing a silent late success after we return 400.
         _cancel_saga(order_id)
+
+        # Re-read the order: there is a race between _cancel_saga and
+        # on_pay_success.  If on_pay_success already marked the order
+        # COMPLETED before _cancel_saga could act, the cancel was a no-op
+        # and the checkout actually succeeded.  Return 200 in that case so
+        # the caller's bookkeeping stays consistent with the real state.
+        order_entry = get_order_from_db(order_id)
+        if order_entry and order_entry.status == Status.COMPLETED:
+            return Response("Checkout successful", status=200)
+
         abort(400, "Checkout timed out")
 
 

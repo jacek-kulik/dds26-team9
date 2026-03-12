@@ -5,6 +5,10 @@ services:
       - ./gateway_nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "8000:80"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       - order-service
       - stock-service
@@ -16,7 +20,7 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:80
       - PROTOCOL=SAGA
-    command: gunicorn -b 0.0.0.0:5000 -w 4 --threads=20 --timeout 30 --log-level=info app:app
+    command: hypercorn -b 0.0.0.0:5000 -w 4 --graceful-timeout 30 --log-level info app:app
     env_file:
       - env/order_redis.env
       - env/bus_redis.env
@@ -30,7 +34,7 @@ services:
   stock-service:
     build: ./stock
     image: stock:latest
-    command: gunicorn -b 0.0.0.0:5000 -w 4 --threads=20 --timeout 30 --log-level=info app:app
+    command: hypercorn -b 0.0.0.0:5000 -w 4 --graceful-timeout 30 --log-level info app:app
     env_file:
       - env/stock_redis.env
       - env/bus_redis.env
@@ -44,7 +48,7 @@ services:
   payment-service:
     build: ./payment
     image: user:latest
-    command: gunicorn -b 0.0.0.0:5000 -w 4 --threads=20 --timeout 30 --log-level=info app:app
+    command: hypercorn -b 0.0.0.0:5000 -w 4 --graceful-timeout 30 --log-level info app:app
     env_file:
       - env/payment_redis.env
       - env/bus_redis.env

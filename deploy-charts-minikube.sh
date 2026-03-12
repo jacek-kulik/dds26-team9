@@ -5,7 +5,7 @@ echo "=== Starting minikube ==="
 if minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
   echo "Minikube is already running, skipping start."
 else
-  minikube start --cpus=max --memory=max
+  minikube start --cpus=max --memory=15800
 fi
 
 echo "=== Enabling ingress addon ==="
@@ -33,7 +33,7 @@ echo "=== Applying Kubernetes manifests ==="
 kubectl apply -f k8s/
 
 echo "=== Waiting for deployments to roll out ==="
-kubectl rollout restart deployment order-deployment stock-deployment user-deployment
+#kubectl rollout restart deployment order-deployment stock-deployment user-deployment
 kubectl rollout status deployment order-deployment stock-deployment user-deployment --timeout=120s
 
 echo "=== Waiting for ingress controller to be ready ==="

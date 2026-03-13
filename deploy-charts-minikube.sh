@@ -44,3 +44,4 @@ echo "=== Deployment complete! ==="
 echo "Minikube IP: $(minikube ip)"
 echo "To access services, run: minikube tunnel"
 echo "Or use: $(minikube service ingress-nginx-controller -n ingress-nginx --url | head -1)/..."
+sudo minikube tunnel

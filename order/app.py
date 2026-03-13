@@ -641,7 +641,7 @@ async def create_order(user_id: str):
     try:
         await db.set(key, value)
     except redis_exceptions.RedisError:
-        abort(400, DB_ERROR_STR)
+        abort(401, DB_ERROR_STR)
     return jsonify({'order_id': key})
 
 
@@ -677,7 +677,7 @@ async def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
     try:
         await db.mset(kv_pairs)
     except redis_exceptions.RedisError:
-        abort(400, DB_ERROR_STR)
+        abort(402, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for orders successful"})
 
 @app.get('/find/<order_id>')
@@ -699,7 +699,7 @@ async def add_item(order_id: str, item_id: str, quantity: int):
     item_reply = await _http.get(f"{GATEWAY_URL}/stock/find/{item_id}")
     if item_reply.status_code != 200:
         # Request failed because item does not exist
-        abort(400, f"Item: {item_id} does not exist!")
+        abort(403, f"Item: {item_id} does not exist!")
     item_json: dict = item_reply.json()
     price = item_json["price"]
 
@@ -710,7 +710,7 @@ async def add_item(order_id: str, item_id: str, quantity: int):
 
     success, new_total = await atomic_update(db, order_id, OrderValue, modifier)
     if not success:
-        abort(400, f"Order failed to add item!")
+        abort(403, f"Order failed to add item!")
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {new_total}",
                     status=200)
 
@@ -724,7 +724,7 @@ async def checkout(order_id: str):
 async def saga_checkout(order_id: str):
     order_entry = await get_order_from_db(order_id)
     if order_entry is None:
-        abort(400, f"Order: {order_id} not found!")
+        abort(404, f"Order: {order_id} not found!")
 
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
@@ -743,7 +743,7 @@ async def saga_checkout(order_id: str):
 
     success, _ = await atomic_update(db, order_id, OrderValue, modifier)
     if not success:
-        abort(400, f"Order: {order_id} not found!")
+        abort(404, f"Order: {order_id} not found!")
 
     for item_id, quantity in items:
         await messaging.publish("stock", {
@@ -753,19 +753,19 @@ async def saga_checkout(order_id: str):
             "amount": str(quantity),
         })
 
-    order_entry = await get_order_status(order_id, timeout=2.0)
+    order_entry = await get_order_status(order_id, timeout=10.0)
     if order_entry is None:
-        abort(400, DB_ERROR_STR)
+        abort(404, DB_ERROR_STR)
 
     if order_entry.status == Status.COMPLETED:
         return Response("Checkout successful", status=200)
     elif order_entry.status == Status.FAILED:
-        return Response("Checkout failed", 400)
+        return Response("Checkout failed", 404)
     else:
         # Timed out — cancel the saga so it converges to FAILED,
-        # preventing a silent late success after we return 400.
+        # preventing a silent late success after we return 4xx.
         await _cancel_saga(order_id)
-        abort(400, "Checkout timed out")
+        abort(404, "Checkout timed out")
 
 
 async def _cancel_saga(order_id: str):
@@ -847,12 +847,12 @@ async def two_pc_checkout(order_id: str):
         "amount": str(order_entry.total_cost)
     })
 
-    order_entry = await get_order_status(order_id, timeout=2.0)
+    order_entry = await get_order_status(order_id, timeout=10.0)
 
     if order_entry.status == Status.COMPLETED:
         return Response("2PC checkout successful", 200)
     else:
-        return Response("2PC checkout failed", 400)
+        return Response("2PC checkout failed", 404)
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

@@ -65,12 +65,12 @@ async def get_user_from_db(user_id: str) -> UserValue | None:
         # get serialized data
         entry: bytes = await db.get(user_id)
     except redis_exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        return abort(405, DB_ERROR_STR)
     # deserialize data if it exists else return null
     entry: UserValue | None = msgpack.decode(entry, type=UserValue) if entry else None
     if entry is None:
         # if user does not exist in the database; abort
-        abort(400, f"User: {user_id} not found!")
+        abort(405, f"User: {user_id} not found!")
     return entry
 
 async def handle_pay(order_id: str, user_id: str, amount: int):
@@ -366,7 +366,7 @@ async def create_user():
     try:
         await db.set(key, value)
     except redis_exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        return abort(406, DB_ERROR_STR)
     return jsonify({'user_id': key})
 
 
@@ -379,7 +379,7 @@ async def batch_init_users(n: int, starting_money: int):
     try:
         await db.mset(kv_pairs)
     except redis_exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        return abort(407, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for users successful"})
 
 
@@ -402,7 +402,7 @@ async def add_credit(user_id: str, amount: int):
 
     success, new_credit = await atomic_update(db, user_id, UserValue, modifier)
     if not success:
-        abort(400, f"User: {user_id} not found!")
+        abort(408, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {new_credit}", status=200)
 
 
@@ -419,8 +419,8 @@ async def remove_credit(user_id: str, amount: int):
     success, result = await atomic_update(db, user_id, UserValue, modifier)
     if not success:
         if result:
-            abort(400, result)
-        abort(400, f"User: {user_id} not found!")
+            abort(409, result)
+        abort(409, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {result}", status=200)
 
 

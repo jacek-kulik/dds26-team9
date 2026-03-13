@@ -67,7 +67,7 @@ spec:
             - name: GATEWAY_URL
               value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
             - name: PROTOCOL
-              value: "2PC"
+              value: "SAGA"
             - name: SERVICE_NAME
               value: "order"
             - name: REDIS_HOST

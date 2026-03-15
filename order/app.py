@@ -605,20 +605,23 @@ async def recover_incomplete_saga():
 WORKER_COUNT = 6
 WORKER_DRAIN_TIMEOUT = 10
 
+RUN_MODE = os.environ.get("RUN_MODE", "all")
 
 @app.before_serving
 async def startup():
     global _http
     _http = httpx.AsyncClient(timeout=10.0)
 
-    for i in range(WORKER_COUNT):
-        task = asyncio.create_task(worker(f"order-{os.getpid()}-{i}"),name=f"order-worker-{i}")
-        _worker_tasks.append(task)
+    if RUN_MODE != "web":
+        # Only spawn consumers if its not a web pod
+        for i in range(WORKER_COUNT):
+            task = asyncio.create_task(worker(f"order-{os.getpid()}-{i}"),name=f"order-worker-{i}")
+            _worker_tasks.append(task)
 
-    if PROTOCOL == "2PC":
-        await recover_incomplete_2pc()
-    elif PROTOCOL == "SAGA":
-        _worker_tasks.append(asyncio.create_task(recover_incomplete_saga(), name="saga-recovery"))
+        if PROTOCOL == "2PC":
+            await recover_incomplete_2pc()
+        elif PROTOCOL == "SAGA":
+            _worker_tasks.append(asyncio.create_task(recover_incomplete_saga(), name="saga-recovery"))
 
 @app.after_serving
 async def shutdown():

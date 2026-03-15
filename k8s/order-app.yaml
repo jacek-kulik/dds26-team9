@@ -6,24 +6,28 @@ spec:
   type: ClusterIP
   selector:
     component: order
+    role: web
   ports:
     - port: 5000
       name: http
       targetPort: 5000
 ---
+# HTTP pods
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: order-deployment
+  name: order-web
 spec:
   replicas: 4
   selector:
     matchLabels:
       component: order
+      role: web
   template:
     metadata:
       labels:
         component: order
+        role: web
     spec:
       terminationGracePeriodSeconds: 45
       containers:
@@ -60,16 +64,83 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           env:
-            - name: USER_SERVICE_URL
-              value: "user-service"
-            - name: STOCK_SERVICE_URL
-              value: "stock-service"
-            - name: GATEWAY_URL
-              value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+            - name: RUN_MODE
+              value: "web"
             - name: PROTOCOL
               value: "SAGA"
             - name: SERVICE_NAME
               value: "order"
+            - name: GATEWAY_URL
+              value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+            - name: REDIS_HOST
+              value: redis-node-0.redis-headless.default.svc.cluster.local
+            - name: REDIS_PORT
+              value: '6379'
+            - name: REDIS_PASSWORD
+              value: "redis"
+            - name: REDIS_DB
+              value: "0"
+            - name: REDIS_SENTINEL_HOST
+              value: redis.default.svc.cluster.local
+            - name: REDIS_SENTINEL_PORT
+              value: '26379'
+            - name: REDIS_SENTINEL_MASTER
+              value: "mymaster"
+            - name: BUS_REDIS_HOST
+              value: redis-node-0.redis-headless.default.svc.cluster.local
+            - name: BUS_REDIS_PORT
+              value: '6379'
+            - name: BUS_REDIS_PASSWORD
+              value: "redis"
+            - name: BUS_REDIS_DB
+              value: "3"
+            - name: BUS_REDIS_SENTINEL_HOST
+              value: redis.default.svc.cluster.local
+            - name: BUS_REDIS_SENTINEL_PORT
+              value: '26379'
+            - name: BUS_REDIS_SENTINEL_MASTER
+              value: "mymaster"
+---
+# Worker pods: no HTTP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-worker
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      component: order
+      role: worker
+  template:
+    metadata:
+      labels:
+        component: order
+        role: worker
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: order-worker
+          image: order:latest
+          imagePullPolicy: Never
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+          command: ["python"]
+          args: ["worker_main.py"]
+          env:
+            - name: SERVICE_NAME
+              value: "order"
+            - name: WORKER_COUNT
+              value: "6"
+            - name: PROTOCOL
+              value: "SAGA"
+            - name: GATEWAY_URL
+              value: "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
             - name: REDIS_HOST
               value: redis-node-0.redis-headless.default.svc.cluster.local
             - name: REDIS_PORT

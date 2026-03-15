@@ -255,18 +255,15 @@ _worker_tasks: list[asyncio.Task] = []
 WORKER_COUNT = 6
 WORKER_DRAIN_TIMEOUT = 10
 
+RUN_MODE = os.environ.get("RUN_MODE", "all")
 @app.before_serving
 async def startup():
-    for i in range(WORKER_COUNT):
-        task = asyncio.create_task(
-            worker(f"stock-{os.getpid()}-{i}"),
-            name=f"stock-worker-{i}",
-        )
-        _worker_tasks.append(task)
+    if RUN_MODE != "web":
+        for i in range(WORKER_COUNT):
+            task = asyncio.create_task(worker(f"stock-{os.getpid()}-{i}"),name=f"stock-worker-{i}")
+            _worker_tasks.append(task)
 
-    _worker_tasks.append(asyncio.create_task(_cleanup_stale_tx(), name="stock-tx-cleanup"))
-
-
+        _worker_tasks.append(asyncio.create_task(_cleanup_stale_tx(), name="stock-tx-cleanup"))
 @app.after_serving
 async def shutdown():
     messaging.request_shutdown()

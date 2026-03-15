@@ -724,7 +724,7 @@ async def checkout(order_id: str):
 async def saga_checkout(order_id: str):
     order_entry = await get_order_from_db(order_id)
     if order_entry is None:
-        abort(404, f"Order: {order_id} not found!")
+        abort(499, f"Order: {order_id} not found!")
 
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
@@ -743,7 +743,7 @@ async def saga_checkout(order_id: str):
 
     success, _ = await atomic_update(db, order_id, OrderValue, modifier)
     if not success:
-        abort(404, f"Order: {order_id} not found!")
+        abort(498, f"Order: {order_id} not found!")
 
     for item_id, quantity in items:
         await messaging.publish("stock", {
@@ -755,17 +755,17 @@ async def saga_checkout(order_id: str):
 
     order_entry = await get_order_status(order_id, timeout=10.0)
     if order_entry is None:
-        abort(404, DB_ERROR_STR)
+        abort(497, DB_ERROR_STR)
 
     if order_entry.status == Status.COMPLETED:
         return Response("Checkout successful", status=200)
     elif order_entry.status == Status.FAILED:
-        return Response("Checkout failed", 404)
+        return Response("Checkout failed", 496)
     else:
         # Timed out — cancel the saga so it converges to FAILED,
         # preventing a silent late success after we return 4xx.
         await _cancel_saga(order_id)
-        abort(404, "Checkout timed out")
+        abort(495, "Checkout timed out")
 
 
 async def _cancel_saga(order_id: str):
@@ -852,7 +852,7 @@ async def two_pc_checkout(order_id: str):
     if order_entry.status == Status.COMPLETED:
         return Response("2PC checkout successful", 200)
     else:
-        return Response("2PC checkout failed", 404)
+        return Response("2PC checkout failed", 444)
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

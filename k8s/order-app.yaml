@@ -38,7 +38,7 @@ spec:
               memory: "1Gi"
               cpu: "1"
           command: ["hypercorn"]
-          args: ["-b", "0.0.0.0:5000", "-w", "4", "--graceful-timeout", "30", "--log-level=info", "app:app"]
+          args: ["-b", "0.0.0.0:5000", "-w", "6", "--graceful-timeout", "30", "--log-level=info", "app:app"]
           ports:
             - containerPort: 5000
           lifecycle:

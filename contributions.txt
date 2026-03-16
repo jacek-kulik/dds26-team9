@@ -1,4 +1,4 @@
 Antreas Surname - 
 Daniel Surname - 
 Jacek Kulik - 5772281 - Scaling and Failure Recovery
-Victor Surname - 
+Victor Didraga - 5762162 - Message Broker, Sagas, Async deployments

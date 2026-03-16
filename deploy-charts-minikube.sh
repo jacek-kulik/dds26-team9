@@ -5,11 +5,14 @@ echo "=== Starting minikube ==="
 if minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
   echo "Minikube is already running, skipping start."
 else
-  minikube start --cpus=max --memory=23700
+  minikube start --cpus=max --memory=24576
 fi
 
 echo "=== Enabling ingress addon ==="
 minikube addons enable ingress
+
+echo "=== Enabling metrics server ==="
+minikube addons enable metrics-server
 
 echo "=== Setting up Helm repos ==="
 helm repo add bitnami https://charts.bitnami.com/bitnami
@@ -33,7 +36,7 @@ echo "=== Applying Kubernetes manifests ==="
 kubectl apply -f k8s/
 
 echo "=== Waiting for deployments to roll out ==="
-#kubectl rollout restart deployment order-deployment stock-deployment user-deployment
+kubectl rollout restart deployment order-web stock-web user-web order-worker stock-worker user-worker
 kubectl rollout status deployment order-web stock-web user-web order-worker stock-worker user-worker --timeout=120s
 
 echo "=== Waiting for ingress controller to be ready ==="

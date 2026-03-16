@@ -61,10 +61,10 @@ class CreateAndCheckoutOrder(SequentialTaskSet):
         order_id = random.randint(0, NUMBER_OF_ORDERS - 1)
         with self.client.post(f"{ORDER_URL}/orders/checkout/{order_id}", name="/orders/checkout/[order_id]",
                               catch_response=True) as response:
-            if 400 <= response.status_code < 500:
-                response.failure(response.text)
-            else:
+            if response.status_code == 200:
                 response.success()
+            else:
+                response.failure(response.text)
 
 
 class MicroservicesUser(HttpUser):

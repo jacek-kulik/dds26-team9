@@ -4,61 +4,231 @@ services:
     volumes:
       - ./gateway_nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - "8000:80"
+      - "5000:80"
     ulimits:
       nofile:
         soft: 65536
         hard: 65536
     depends_on:
-      - order-service
-      - stock-service
-      - payment-service
+      - order-web-1
+      - order-web-2
+      - order-web-3
+      - order-web-4
+      - stock-web-1
+      - stock-web-2
+      - user-web-1
+      - user-web-2
 
-  order-service:
+  # ── Single shared Redis (matches K8s redis-node-0) ─────────────────────────
+  # Order=DB0, Stock=DB1, Payment=DB2, Bus=DB3
+  redis:
+    image: redis:8.6
+    command: redis-server --requirepass redis --maxmemory 512mb
+
+  # ── Order: 4 web + 4 worker ───────────────────────────────────────────────
+
+  order-web-1: &order-web
     build: ./order
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
       - PROTOCOL=SAGA
-    command: hypercorn -b 0.0.0.0:5000 -w 4 --graceful-timeout 30 --log-level info app:app
-    env_file:
-      - env/order_redis.env
-      - env/bus_redis.env
+      - RUN_MODE=web
+      - SERVICE_NAME=order
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - BUS_REDIS_HOST=redis
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level info app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "1"
+          memory: 1G
     depends_on:
-      - order-db
+      - redis
 
-  order-db:
-    image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 512mb
+  order-web-2:
+    <<: *order-web
 
-  stock-service:
+  order-web-3:
+    <<: *order-web
+
+  order-web-4:
+    <<: *order-web
+
+  order-worker-1: &order-worker
+    build: ./order
+    image: order:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+      - PROTOCOL=SAGA
+      - SERVICE_NAME=order
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - BUS_REDIS_HOST=redis
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    depends_on:
+      - redis
+
+  order-worker-2:
+    <<: *order-worker
+
+  order-worker-3:
+    <<: *order-worker
+
+  order-worker-4:
+    <<: *order-worker
+
+  # ── Stock: 2 web + 4 worker ───────────────────────────────────────────────
+
+  stock-web-1: &stock-web
     build: ./stock
     image: stock:latest
-    command: hypercorn -b 0.0.0.0:5000 -w 4 --graceful-timeout 30 --log-level info app:app
-    env_file:
-      - env/stock_redis.env
-      - env/bus_redis.env
+    environment:
+      - RUN_MODE=web
+      - SERVICE_NAME=stock
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - BUS_REDIS_HOST=redis
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level info app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
     depends_on:
-      - stock-db
+      - redis
 
-  stock-db:
-    image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 512mb
+  stock-web-2:
+    <<: *stock-web
 
-  payment-service:
+  stock-worker-1: &stock-worker
+    build: ./stock
+    image: stock:latest
+    environment:
+      - SERVICE_NAME=stock
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - BUS_REDIS_HOST=redis
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    depends_on:
+      - redis
+
+  stock-worker-2:
+    <<: *stock-worker
+
+  stock-worker-3:
+    <<: *stock-worker
+
+  stock-worker-4:
+    <<: *stock-worker
+
+  # ── Payment: 2 web + 4 worker ─────────────────────────────────────────────
+
+  user-web-1: &user-web
     build: ./payment
     image: user:latest
-    command: hypercorn -b 0.0.0.0:5000 -w 4 --graceful-timeout 30 --log-level info app:app
-    env_file:
-      - env/payment_redis.env
-      - env/bus_redis.env
+    environment:
+      - RUN_MODE=web
+      - SERVICE_NAME=payment
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=2
+      - BUS_REDIS_HOST=redis
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level info app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
     depends_on:
-      - payment-db
+      - redis
 
-  payment-db:
-    image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 512mb
+  user-web-2:
+    <<: *user-web
 
-  event-db:
-    image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 512mb
+  user-worker-1: &user-worker
+    build: ./payment
+    image: user:latest
+    environment:
+      - SERVICE_NAME=payment
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=2
+      - BUS_REDIS_HOST=redis
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    depends_on:
+      - redis
+
+  user-worker-2:
+    <<: *user-worker
+
+  user-worker-3:
+    <<: *user-worker
+
+  user-worker-4:
+    <<: *user-worker

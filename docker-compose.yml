@@ -19,11 +19,78 @@ services:
       - user-web-1
       - user-web-2
 
-  # ── Single shared Redis (matches K8s redis-node-0) ─────────────────────────
-  # Order=DB0, Stock=DB1, Payment=DB2, Bus=DB3
-  redis:
+  # ── Redis: 1 master + 2 replicas + 3 sentinels (matches K8s Helm chart) ───
+
+  redis-master:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 512mb
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 512mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    volumes:
+      - redis-master-data:/data
+
+  redis-replica-1:
+    image: redis:8.6
+    command: redis-server --replicaof redis-master 6379 --requirepass redis --masterauth redis --maxmemory 512mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    volumes:
+      - redis-replica-1-data:/data
+    depends_on:
+      - redis-master
+
+  redis-replica-2:
+    image: redis:8.6
+    command: redis-server --replicaof redis-master 6379 --requirepass redis --masterauth redis --maxmemory 512mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    volumes:
+      - redis-replica-2-data:/data
+    depends_on:
+      - redis-master
+
+  redis-sentinel-1: &sentinel
+    image: redis:8.6
+    entrypoint: [ "/bin/sh", "/etc/redis/sentinel-entrypoint.sh" ]
+    volumes:
+      - ./sentinel.conf:/etc/redis/sentinel-ro.conf:ro
+      - ./sentinel-entrypoint.sh:/etc/redis/sentinel-entrypoint.sh:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    depends_on:
+      - redis-master
+      - redis-replica-1
+      - redis-replica-2
+
+  redis-sentinel-2:
+    <<: *sentinel
+
+  redis-sentinel-3:
+    <<: *sentinel
 
   # ── Order: 4 web + 4 worker ───────────────────────────────────────────────
 
@@ -35,14 +102,20 @@ services:
       - PROTOCOL=SAGA
       - RUN_MODE=web
       - SERVICE_NAME=order
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-master
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
       - BUS_REDIS_PORT=6379
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level info app:app
     deploy:
       resources:
@@ -53,7 +126,8 @@ services:
           cpus: "1"
           memory: 1G
     depends_on:
-      - redis
+      - redis-master
+      - redis-sentinel-1
 
   order-web-2:
     <<: *order-web
@@ -72,14 +146,20 @@ services:
       - PROTOCOL=SAGA
       - SERVICE_NAME=order
       - WORKER_COUNT=6
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-master
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
       - BUS_REDIS_PORT=6379
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
     command: python worker_main.py
     deploy:
       resources:
@@ -90,7 +170,8 @@ services:
           cpus: "0.25"
           memory: 256M
     depends_on:
-      - redis
+      - redis-master
+      - redis-sentinel-1
 
   order-worker-2:
     <<: *order-worker
@@ -109,14 +190,20 @@ services:
     environment:
       - RUN_MODE=web
       - SERVICE_NAME=stock
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-master
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=1
-      - BUS_REDIS_HOST=redis
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
       - BUS_REDIS_PORT=6379
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level info app:app
     deploy:
       resources:
@@ -127,7 +214,8 @@ services:
           cpus: "0.25"
           memory: 256M
     depends_on:
-      - redis
+      - redis-master
+      - redis-sentinel-1
 
   stock-web-2:
     <<: *stock-web
@@ -138,14 +226,20 @@ services:
     environment:
       - SERVICE_NAME=stock
       - WORKER_COUNT=6
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-master
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=1
-      - BUS_REDIS_HOST=redis
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
       - BUS_REDIS_PORT=6379
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
     command: python worker_main.py
     deploy:
       resources:
@@ -156,7 +250,8 @@ services:
           cpus: "0.25"
           memory: 256M
     depends_on:
-      - redis
+      - redis-master
+      - redis-sentinel-1
 
   stock-worker-2:
     <<: *stock-worker
@@ -175,14 +270,20 @@ services:
     environment:
       - RUN_MODE=web
       - SERVICE_NAME=payment
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-master
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=2
-      - BUS_REDIS_HOST=redis
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
       - BUS_REDIS_PORT=6379
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level info app:app
     deploy:
       resources:
@@ -193,7 +294,8 @@ services:
           cpus: "0.25"
           memory: 256M
     depends_on:
-      - redis
+      - redis-master
+      - redis-sentinel-1
 
   user-web-2:
     <<: *user-web
@@ -204,14 +306,20 @@ services:
     environment:
       - SERVICE_NAME=payment
       - WORKER_COUNT=6
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-master
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=2
-      - BUS_REDIS_HOST=redis
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
       - BUS_REDIS_PORT=6379
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
     command: python worker_main.py
     deploy:
       resources:
@@ -222,7 +330,8 @@ services:
           cpus: "0.25"
           memory: 256M
     depends_on:
-      - redis
+      - redis-master
+      - redis-sentinel-1
 
   user-worker-2:
     <<: *user-worker
@@ -232,3 +341,8 @@ services:
 
   user-worker-4:
     <<: *user-worker
+
+volumes:
+  redis-master-data:
+  redis-replica-1-data:
+  redis-replica-2-data:

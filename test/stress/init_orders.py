@@ -18,7 +18,7 @@ USER_STARTING_CREDIT = 1_000_000
 NUMBER_OF_ORDERS = 100_000
 
 
-with open(os.path.join('..', 'urls.json')) as f:
+with open(os.path.join('..', 'urls_local.json')) as f:
     urls = json.load(f)
     ORDER_URL = urls['ORDER_URL']
     PAYMENT_URL = urls['PAYMENT_URL']

@@ -39,8 +39,8 @@ def _get_gateway_url() -> str:
     return "http://127.0.0.1:8000"
 
 
-ORDER_URL = STOCK_URL = PAYMENT_URL = _get_gateway_url()
-#ORDER_URL = STOCK_URL = PAYMENT_URL = "http://127.0.0.1:8000"
+#ORDER_URL = STOCK_URL = PAYMENT_URL = _get_gateway_url()
+ORDER_URL = STOCK_URL = PAYMENT_URL = "http://127.0.0.1:5000"
 
 ########################################################################################################################
 #   STOCK MICROSERVICE FUNCTIONS

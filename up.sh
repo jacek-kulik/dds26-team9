@@ -26,6 +26,7 @@ cmd=(
   --scale "stock-worker=${STOCK_WORKER_REPLICAS}"
   --scale "user-web=${USER_WEB_REPLICAS}"
   --scale "user-worker=${USER_WORKER_REPLICAS}"
+  --remove-orphans
 )
 
 if [[ "${DETACH}" == "1" ]]; then

@@ -1,4 +1,3 @@
 Antreas Ioannou - 5798825 - 2PC and Tests
-Daniel Surname - 
 Jacek Kulik - 5772281 - Scaling and Failure Recovery
 Victor Didraga - 5762162 - Message Broker, Sagas, Async deployments

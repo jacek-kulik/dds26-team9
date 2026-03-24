@@ -48,7 +48,7 @@ from init_orders import NUMBER_OF_ORDERS
 
 
 # replace the example urls and ports with the appropriate ones
-with open(os.path.join('..', 'urls.json')) as f:
+with open(os.path.join('..', 'urls_local.json')) as f:
     urls = json.load(f)
     ORDER_URL = urls['ORDER_URL']
     PAYMENT_URL = urls['PAYMENT_URL']

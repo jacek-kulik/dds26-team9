@@ -6,6 +6,7 @@ spec:
   type: ClusterIP
   selector:
     component: stock
+    role: web
   ports:
     - port: 5000
       name: http
@@ -14,16 +15,18 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: stock-deployment
+  name: stock-web
 spec:
   replicas: 2
   selector:
     matchLabels:
       component: stock
+      role: web
   template:
     metadata:
       labels:
         component: stock
+        role: web
     spec:
       terminationGracePeriodSeconds: 45
       containers:
@@ -33,12 +36,12 @@ spec:
           resources:
             limits:
               memory: "512Mi"
-              cpu: "500m"
+              cpu: "1"
             requests:
               memory: "256Mi"
               cpu: "250m"
-          command: ["gunicorn"]
-          args: ["-b", "0.0.0.0:5000", "-w", "4", "--threads=20", "--timeout", "30", "--graceful-timeout", "30", "--log-level=info", "app:app"]
+          command: ["hypercorn"]
+          args: ["-b", "0.0.0.0:5000", "-w", "6", "--graceful-timeout", "30", "--log-level=info", "app:app"]
           ports:
             - containerPort: 5000
           lifecycle:
@@ -60,8 +63,74 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
           env:
+            - name: RUN_MODE
+              value: "web"
             - name: SERVICE_NAME
               value: "stock"
+            - name: REDIS_HOST
+              value: redis-node-0.redis-headless.default.svc.cluster.local
+            - name: REDIS_PORT
+              value: '6379'
+            - name: REDIS_PASSWORD
+              value: "redis"
+            - name: REDIS_DB
+              value: "1"
+            - name: REDIS_SENTINEL_HOST
+              value: redis.default.svc.cluster.local
+            - name: REDIS_SENTINEL_PORT
+              value: '26379'
+            - name: REDIS_SENTINEL_MASTER
+              value: "mymaster"
+            - name: BUS_REDIS_HOST
+              value: redis-node-0.redis-headless.default.svc.cluster.local
+            - name: BUS_REDIS_PORT
+              value: '6379'
+            - name: BUS_REDIS_PASSWORD
+              value: "redis"
+            - name: BUS_REDIS_DB
+              value: "3"
+            - name: BUS_REDIS_SENTINEL_HOST
+              value: redis.default.svc.cluster.local
+            - name: BUS_REDIS_SENTINEL_PORT
+              value: '26379'
+            - name: BUS_REDIS_SENTINEL_MASTER
+              value: "mymaster"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-worker
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      component: stock
+      role: worker
+  template:
+    metadata:
+      labels:
+        component: stock
+        role: worker
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: stock-worker
+          image: stock:latest
+          imagePullPolicy: Never
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+          command: ["python"]
+          args: ["worker_main.py"]
+          env:
+            - name: SERVICE_NAME
+              value: "stock"
+            - name: WORKER_COUNT
+              value: "6"
             - name: REDIS_HOST
               value: redis-node-0.redis-headless.default.svc.cluster.local
             - name: REDIS_PORT

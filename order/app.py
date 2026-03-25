@@ -11,7 +11,7 @@ import redis.exceptions as redis_exceptions
 import httpx
 from msgspec import msgpack, Struct, field
 from quart import Quart, jsonify, abort, Response
-import json
+import traceback
 
 import utils.messaging as messaging
 from utils.atomic import atomic_update
@@ -27,15 +27,8 @@ app = Quart("order-service")
 
 _http: httpx.AsyncClient | None = None
 
-# Load config
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'config.json')
-try:
-    with open(CONFIG_PATH, 'r') as f:
-        _config = json.load(f)
-except Exception:
-    _config = {}
 
-ORDER_TIMEOUT_SECONDS = float(_config.get('ORDER_TIMEOUT_SECONDS', 10.0))
+ORDER_TIMEOUT_SECONDS = float(os.getenv("ORDER_TIMEOUT_SECONDS", 10.0))
 
 def _make_redis_client(host_var='REDIS_HOST', port_var='REDIS_PORT',
                        password_var='REDIS_PASSWORD', db_var='REDIS_DB',
@@ -740,7 +733,7 @@ async def checkout(order_id: str):
 async def saga_checkout(order_id: str):
     order_entry = await get_order_from_db(order_id)
     if order_entry is None:
-        abort(499, f"Order: {order_id} not found!")
+        abort(404, f"Order: {order_id} not found!")
 
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
@@ -759,9 +752,10 @@ async def saga_checkout(order_id: str):
 
     success, _ = await atomic_update(db, order_id, OrderValue, modifier)
     if not success:
-        abort(498, f"Order: {order_id} not found!")
+        abort(404, f"Order: {order_id} not found!")
 
     for item_id, quantity in items:
+
         await messaging.publish("stock", {
             "action": "subtract",
             "order_id": order_id,
@@ -769,9 +763,9 @@ async def saga_checkout(order_id: str):
             "amount": str(quantity),
         })
 
-    order_entry = await get_order_status(order_id, timeout=10.0)
+    order_entry = await get_order_status(order_id, timeout=ORDER_TIMEOUT_SECONDS)
     if order_entry is None:
-        abort(497, DB_ERROR_STR)
+        abort(404, DB_ERROR_STR)
 
     if order_entry.status == Status.COMPLETED:
         return Response("Checkout successful", status=200)
@@ -781,7 +775,7 @@ async def saga_checkout(order_id: str):
         # Timed out — cancel the saga so it converges to FAILED,
         # preventing a silent late success after we return 4xx.
         await _cancel_saga(order_id)
-        abort(495, "Checkout timed out")
+        abort(408, "Checkout timed out")
 
 
 async def _cancel_saga(order_id: str):
@@ -863,7 +857,7 @@ async def two_pc_checkout(order_id: str):
         "amount": str(order_entry.total_cost)
     })
 
-    order_entry = await get_order_status(order_id, timeout=10.0)
+    order_entry = await get_order_status(order_id, timeout=ORDER_TIMEOUT_SECONDS)
 
     if order_entry.status == Status.COMPLETED:
         return Response("2PC checkout successful", 200)

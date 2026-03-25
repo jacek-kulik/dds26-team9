@@ -404,7 +404,7 @@ async def add_credit(user_id: str, amount: int):
 
     success, new_credit = await atomic_update(db, user_id, UserValue, modifier)
     if not success:
-        abort(408, f"User: {user_id} not found!")
+        abort(404, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {new_credit}", status=200)
 
 
@@ -421,8 +421,8 @@ async def remove_credit(user_id: str, amount: int):
     success, result = await atomic_update(db, user_id, UserValue, modifier)
     if not success:
         if result:
-            abort(409, result)
-        abort(409, f"User: {user_id} not found!")
+            abort(400, result)
+        abort(404, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {result}", status=200)
 
 

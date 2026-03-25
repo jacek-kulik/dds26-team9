@@ -13,7 +13,7 @@ STOCK_WEB_REPLICAS="${STOCK_WEB_REPLICAS:-2}"
 STOCK_WORKER_REPLICAS="${STOCK_WORKER_REPLICAS:-4}"
 USER_WEB_REPLICAS="${USER_WEB_REPLICAS:-2}"
 USER_WORKER_REPLICAS="${USER_WORKER_REPLICAS:-4}"
-DETACH="${DETACH:-0}"
+DETACH="${DETACH:-1}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -40,7 +40,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
   exit 0
 fi
 
-docker compose down --volumes --remove-orphans
+docker compose down --remove-orphans
 
 "${cmd[@]}"
 

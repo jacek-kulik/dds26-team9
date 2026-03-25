@@ -26,12 +26,12 @@ cmd=(
   --scale "stock-worker=${STOCK_WORKER_REPLICAS}"
   --scale "user-web=${USER_WEB_REPLICAS}"
   --scale "user-worker=${USER_WORKER_REPLICAS}"
-  --remove-orphans
 )
 
 if [[ "${DETACH}" == "1" ]]; then
   cmd+=( -d )
 fi
+
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf 'DRY RUN: '
@@ -39,6 +39,8 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf '\n'
   exit 0
 fi
+
+docker compose down --volumes --remove-orphans
 
 "${cmd[@]}"
 

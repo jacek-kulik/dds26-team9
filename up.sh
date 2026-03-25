@@ -19,8 +19,12 @@ DETACH="${DETACH:-0}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-cmd=(
-  docker compose up --build
+build_cmd=(
+  docker compose build --no-cache
+)
+
+up_cmd=(
+  docker compose up
   --scale "order-web=${ORDER_WEB_REPLICAS}"
   --scale "order-worker=${ORDER_WORKER_REPLICAS}"
   --scale "orchestrator-worker=${ORCH_WORKER_REPLICAS}"
@@ -32,16 +36,20 @@ cmd=(
 )
 
 if [[ "${DETACH}" == "1" ]]; then
-  cmd+=( -d )
+  up_cmd+=( -d )
 fi
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-  printf 'DRY RUN: '
-  printf '%q ' "${cmd[@]}"
+  printf 'DRY RUN BUILD: '
+  printf '%q ' "${build_cmd[@]}"
+  printf '\n'
+  printf 'DRY RUN UP: '
+  printf '%q ' "${up_cmd[@]}"
   printf '\n'
   exit 0
 fi
 
-"${cmd[@]}"
+"${build_cmd[@]}"
+"${up_cmd[@]}"
 
 

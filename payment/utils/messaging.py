@@ -57,6 +57,7 @@ STREAMS = {
     "order":   "order.events",
     "stock":   "stock.events",
     "payment": "payment.events",
+    "orchestrator": "orchestrator.events"
 }
 
 STREAM_MAX_LEN = 50000
@@ -76,6 +77,7 @@ GROUPS = {
     "order":   "order-workers",
     "stock":   "stock-workers",
     "payment": "payment-workers",
+    "orchestrator": "orchestrator-workers",
 }
 
 async def ensure_group(service: str, retries: int = 30, delay: float = 1.0):

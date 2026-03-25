@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import os
@@ -18,7 +17,7 @@ WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))
 #worker class, imports the worker loop functionality from the app
 async def main():
     if SERVICE_NAME == "order":
-        from app import worker, db, messaging, recover_incomplete_2pc, recover_incomplete_saga, PROTOCOL
+        from app import worker, db, messaging
     elif SERVICE_NAME == "stock":
         from app import worker, db, messaging
     elif SERVICE_NAME == "payment":
@@ -47,14 +46,6 @@ async def main():
         tasks.append(t)
     logger.info(f"Started {WORKER_COUNT} consumer tasks for {SERVICE_NAME}")
 
-    if SERVICE_NAME == "order":
-        if PROTOCOL == "2PC":
-            await recover_incomplete_2pc()
-            logger.info("2PC recovery complete")
-        elif PROTOCOL == "SAGA":
-            t = asyncio.create_task(recover_incomplete_saga(), name="saga-recovery")
-            tasks.append(t)
-            logger.info("Saga recovery task started")
 
     await stop.wait()
 

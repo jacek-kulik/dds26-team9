@@ -83,7 +83,7 @@ async def handle_subtract(order_id: str, item_id: str, amount: int):
     ok, err = await atomic_update(db, item_id, StockValue, modifier)
 
     if not ok:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "subtract_failed",
             "order_id": order_id,
             "item_id": item_id,
@@ -91,7 +91,7 @@ async def handle_subtract(order_id: str, item_id: str, amount: int):
         })
         return
 
-    await messaging.publish("order", {
+    await messaging.publish("orchestrator", {
         "action": "subtract_success",
         "order_id": order_id,
         "item_id": item_id,
@@ -106,7 +106,7 @@ async def handle_add(order_id: str, item_id: str, amount: int):
     ok, err = await atomic_update(db, item_id, StockValue, modifier)
 
     if not ok:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "rollback_failed",
             "order_id": order_id,
             "item_id": item_id,
@@ -114,7 +114,7 @@ async def handle_add(order_id: str, item_id: str, amount: int):
         })
         return
 
-    await messaging.publish("order", {
+    await messaging.publish("orchestrator", {
         "action": "rollback_success",
         "order_id": order_id,
         "item_id": item_id,
@@ -128,7 +128,7 @@ async def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
         tx = msgpack.decode(raw, type=StockTx)
         if tx.state == "PREPARED":
             # Duplicate prepare for the current in-flight attempt → idempotent shortcut
-            await messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+            await messaging.publish("orchestrator", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
             return
         # COMMITTED or ABORTED are terminal states from a *previous* checkout
         # attempt for this order.  Delete the stale key and re-evaluate fresh.
@@ -153,13 +153,13 @@ async def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
                 await atomic_update(db, rb_item, StockValue, rb_mod)
 
             await db.set(tx_key, msgpack.encode(StockTx(items=items, state="ABORTED", created_ts=time.time())))
-            await messaging.publish("order", {"action": "vote_no", "order_id": order_id, "who": "stock"})
+            await messaging.publish("orchestrator", {"action": "vote_no", "order_id": order_id, "who": "stock"})
             return
 
         subtracted.append((item_id, int(amount)))
 
     await db.set(tx_key, msgpack.encode(StockTx(items=items, state="PREPARED", created_ts=time.time())))
-    await messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+    await messaging.publish("orchestrator", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
 
 
 async def handle_stock_commit(order_id: str):
@@ -171,7 +171,7 @@ async def handle_stock_commit(order_id: str):
     tx = msgpack.decode(raw, type=StockTx)
 
     if tx.state == "COMMITTED":
-        await messaging.publish("order", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
+        await messaging.publish("orchestrator", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
         return
 
     if tx.state != "PREPARED":
@@ -180,20 +180,20 @@ async def handle_stock_commit(order_id: str):
     tx.state = "COMMITTED"
     await db.set(tx_key, msgpack.encode(tx))
 
-    await messaging.publish("order", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
+    await messaging.publish("orchestrator", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
 
 
 async def handle_stock_abort(order_id: str):
     tx_key = f"tx:{order_id}"
     raw = await db.get(tx_key)
     if not raw:
-        await messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        await messaging.publish("orchestrator", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
         return
 
     tx = msgpack.decode(raw, type=StockTx)
 
     if tx.state == "ABORTED":
-        await messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        await messaging.publish("orchestrator", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
         return
 
     if tx.state != "PREPARED":
@@ -208,7 +208,7 @@ async def handle_stock_abort(order_id: str):
     tx.state = "ABORTED"
     await db.set(tx_key, msgpack.encode(tx))
 
-    await messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+    await messaging.publish("orchestrator", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
 
 DISPATCH = {
     "subtract": handle_subtract,

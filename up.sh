@@ -9,6 +9,7 @@ set -euo pipefail
 
 ORDER_WEB_REPLICAS="${ORDER_WEB_REPLICAS:-4}"
 ORDER_WORKER_REPLICAS="${ORDER_WORKER_REPLICAS:-4}"
+ORCH_WORKER_REPLICAS="${ORCH_WORKER_REPLICAS:-4}"
 STOCK_WEB_REPLICAS="${STOCK_WEB_REPLICAS:-2}"
 STOCK_WORKER_REPLICAS="${STOCK_WORKER_REPLICAS:-4}"
 USER_WEB_REPLICAS="${USER_WEB_REPLICAS:-2}"
@@ -22,6 +23,7 @@ cmd=(
   docker compose up --build
   --scale "order-web=${ORDER_WEB_REPLICAS}"
   --scale "order-worker=${ORDER_WORKER_REPLICAS}"
+  --scale "orchestrator-worker=${ORCH_WORKER_REPLICAS}"
   --scale "stock-web=${STOCK_WEB_REPLICAS}"
   --scale "stock-worker=${STOCK_WORKER_REPLICAS}"
   --scale "user-web=${USER_WEB_REPLICAS}"

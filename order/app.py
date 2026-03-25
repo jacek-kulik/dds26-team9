@@ -11,6 +11,7 @@ import redis.exceptions as redis_exceptions
 import httpx
 from msgspec import msgpack, Struct, field
 from quart import Quart, jsonify, abort, Response
+import json
 
 import utils.messaging as messaging
 from utils.atomic import atomic_update
@@ -25,6 +26,16 @@ GATEWAY_URL = os.environ['GATEWAY_URL']
 app = Quart("order-service")
 
 _http: httpx.AsyncClient | None = None
+
+# Load config
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'config.json')
+try:
+    with open(CONFIG_PATH, 'r') as f:
+        _config = json.load(f)
+except Exception:
+    _config = {}
+
+ORDER_TIMEOUT_SECONDS = float(_config.get('ORDER_TIMEOUT_SECONDS', 10.0))
 
 def _make_redis_client(host_var='REDIS_HOST', port_var='REDIS_PORT',
                        password_var='REDIS_PASSWORD', db_var='REDIS_DB',
@@ -117,7 +128,9 @@ async def get_order_from_db(order_id: str) -> OrderValue | None:
         abort(400, f"Order: {order_id} not found!")
     return entry
 
-async def get_order_status(order_id: str, timeout: float = 10.0, interval: float = 0.1) -> OrderValue | None:
+async def get_order_status(order_id: str, timeout: float = None, interval: float = 0.1) -> OrderValue | None:
+    if timeout is None:
+        timeout = ORDER_TIMEOUT_SECONDS
     deadline = time.time() + timeout
     while time.time() < deadline:
         order = await get_order_from_db(order_id)
@@ -610,7 +623,7 @@ RUN_MODE = os.environ.get("RUN_MODE", "all")
 @app.before_serving
 async def startup():
     global _http
-    _http = httpx.AsyncClient(timeout=10.0)
+    _http = httpx.AsyncClient(timeout=ORDER_TIMEOUT_SECONDS)
 
     if RUN_MODE != "web":
         # Only spawn consumers if its not a web pod

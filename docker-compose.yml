@@ -105,7 +105,6 @@ services:
     restart: unless-stopped
     environment:
       - GATEWAY_URL=http://gateway:80
-      - PROTOCOL=SAGA
       - RUN_MODE=web
       - SERVICE_NAME=order
       - REDIS_HOST=redis-master
@@ -147,7 +146,6 @@ services:
     restart: unless-stopped
     environment:
       - GATEWAY_URL=http://gateway:80
-      - PROTOCOL=SAGA
       - SERVICE_NAME=order
       - WORKER_COUNT=6
       - REDIS_HOST=redis-master

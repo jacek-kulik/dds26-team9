@@ -54,6 +54,12 @@ class Status(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+class TwoPCStatus(str, Enum):
+    PREPARING = "PREPARING"
+    COMMITTING = "COMMITTING"
+    ABORTING = "ABORTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 class SagaState(Struct):
     order_id: str
@@ -70,6 +76,33 @@ class SagaState(Struct):
     error: str = ""
     created_ts: float = 0.0
 
+class TwoPCState(Struct):
+    order_id: str
+    user_id: str
+    total_cost: int
+    items: list[tuple[str, int]]
+
+    status: str = TwoPCStatus.PREPARING
+
+    # Votes
+    stock_vote: str = ""       # "", "YES", "NO"
+    payment_vote: str = ""     # "", "YES", "NO"
+
+    # Commit acknowledgements
+    stock_commit_ack: bool = False
+    payment_commit_ack: bool = False
+
+    # Abort acknowledgements
+    stock_abort_ack: bool = False
+    payment_abort_ack: bool = False
+
+    # Metadata
+    error: str = ""
+    created_ts: float = 0.0
+    decision_ts: float = 0.0
+
+def get_2pc_key(order_id: str) -> str:
+    return f"2pc:{order_id}"
 
 async def handle_saga_start(order_id: str, user_id: str, total_cost: int,
                             items: list[tuple[str, int]]):
@@ -277,15 +310,23 @@ async def worker(worker_id: str):
             action = data.get(b"action", b"").decode()
             order_id = data.get(b"order_id", b"").decode()
 
-            if action == "saga_start":
+            if action == "checkout_start":
+                order_id = data.get(b"order_id", b"").decode()
                 user_id = data.get(b"user_id", b"").decode()
                 total_cost = int(data.get(b"total_cost", b"0"))
-                items_raw = data.get(b"items", b"")
-                items = msgpack.decode(items_raw)
-                await handle_saga_start(order_id, user_id, total_cost, items)
+                items = msgpack.decode(data.get(b"items", b""))
 
-            elif action == "saga_cancel":
-                await handle_saga_cancel(order_id)
+                if PROTOCOL == "2PC":
+                    await handle_two_pc_start(order_id, user_id, total_cost, items)
+                else:
+                    await handle_saga_start(order_id, user_id, total_cost, items)
+
+            elif action == "checkout_cancel":
+                if PROTOCOL == "2PC":
+                    order_id = data.get(b"order_id", b"").decode()
+                    await handle_two_pc_cancel(order_id)
+                else:
+                    await handle_saga_cancel(order_id)
 
             elif action == "subtract_success":
                 await on_subtract_success(order_id)
@@ -299,6 +340,29 @@ async def worker(worker_id: str):
             elif action == "pay_failed":
                 await on_pay_failed(order_id, data.get(b"error", b"").decode())
 
+            #########
+            #  2PC  #
+            #########
+            elif action == "vote_yes":
+                order_id = data.get(b"order_id", b"").decode()
+                who = data.get(b"who", b"").decode()
+                await on_vote_yes(order_id, who)
+
+            elif action == "vote_no":
+                order_id = data.get(b"order_id", b"").decode()
+                who = data.get(b"who", b"").decode()
+                await on_vote_no(order_id, who)
+
+            elif action == "commit_ack":
+                order_id = data.get(b"order_id", b"").decode()
+                who = data.get(b"who", b"").decode()
+                await on_commit_ack(order_id, who)
+
+            elif action == "abort_ack":
+                order_id = data.get(b"order_id", b"").decode()
+                who = data.get(b"who", b"").decode()
+                await on_abort_ack(order_id, who)
+
 
             await messaging.ack("orchestrator", msg_id)
 
@@ -307,6 +371,7 @@ async def worker(worker_id: str):
 
 
 SAGA_RECOVERY_THRESHOLD = 15
+TWO_PC_RECOVERY_THRESHOLD = 15
 
 async def recover_incomplete_saga():
     await asyncio.sleep(5)
@@ -380,6 +445,311 @@ async def recover_incomplete_saga():
         await asyncio.sleep(10)
 
 
+###########################################
+#                   2PC                   #
+###########################################
+
+async def handle_two_pc_start(order_id: str, user_id: str, total_cost: int, items: list[tuple[str, int]]):
+    key = get_2pc_key(order_id)
+
+    state = TwoPCState(
+        order_id=order_id,
+        user_id=user_id,
+        total_cost=total_cost,
+        items=items,
+        status=TwoPCStatus.PREPARING,
+        stock_vote="",
+        payment_vote="",
+        stock_commit_ack=False,
+        payment_commit_ack=False,
+        stock_abort_ack=False,
+        payment_abort_ack=False,
+        error="",
+        created_ts=time.time(),
+        decision_ts=0.0,
+    )
+
+    await db.set(key, msgpack.encode(state))
+
+    # Send prepare to stock
+    await messaging.publish("stock", {
+        "action": "stock_prepare",
+        "order_id": order_id,
+        "items": msgpack.encode(items),
+    })
+
+    # Send prepare to payment
+    await messaging.publish("payment", {
+        "action": "payment_prepare",
+        "order_id": order_id,
+        "user_id": user_id,
+        "amount": str(total_cost),
+    })
+
+
+
+async def on_vote_yes(order_id: str, who: str):
+    key = get_2pc_key(order_id)
+
+    def modifier(state: TwoPCState):
+        if state is None:
+            return None, "missing"
+
+        # Ignore if already decided or finished
+        if state.status in (TwoPCStatus.COMMITTING, TwoPCStatus.ABORTING,
+                            TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
+            return state, state
+
+        if who == "stock":
+            state.stock_vote = "YES"
+        elif who == "payment":
+            state.payment_vote = "YES"
+
+        # If both voted YES → COMMIT
+        if state.stock_vote == "YES" and state.payment_vote == "YES":
+            state.status = TwoPCStatus.COMMITTING
+            state.decision_ts = time.time()
+
+        return state, state
+
+    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+    if not success or updated_state is None:
+        return
+
+    # If we just moved to COMMITTING → send commit
+    if updated_state.status == TwoPCStatus.COMMITTING:
+        await messaging.publish("stock", {
+            "action": "stock_commit",
+            "order_id": order_id,
+        })
+        await messaging.publish("payment", {
+            "action": "payment_commit",
+            "order_id": order_id,
+        })
+
+async def on_vote_no(order_id: str, who: str):
+    key = get_2pc_key(order_id)
+
+    def modifier(state: TwoPCState):
+        if state is None:
+            return None, "missing"
+
+        # Ignore if already aborting or finished
+        if state.status in (
+                TwoPCStatus.COMMITTING,
+                TwoPCStatus.ABORTING,
+                TwoPCStatus.COMPLETED,
+                TwoPCStatus.FAILED,
+        ):
+            return state, state
+
+        if who == "stock":
+            state.stock_vote = "NO"
+        elif who == "payment":
+            state.payment_vote = "NO"
+
+        # Move to ABORTING
+        state.status = TwoPCStatus.ABORTING
+        state.decision_ts = time.time()
+        state.error = f"{who} voted NO"
+
+        return state, state
+
+    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+    if not success or updated_state is None:
+        return
+
+    # Send abort to BOTH participants
+    await messaging.publish("stock", {
+        "action": "stock_abort",
+        "order_id": order_id,
+    })
+    await messaging.publish("payment", {
+        "action": "payment_abort",
+        "order_id": order_id,
+    })
+
+async def on_commit_ack(order_id: str, who: str):
+    key = get_2pc_key(order_id)
+
+    def modifier(state: TwoPCState):
+        if state is None:
+            return None, "missing"
+
+        if state.status != TwoPCStatus.COMMITTING:
+            return state, state
+
+        if who == "stock":
+            state.stock_commit_ack = True
+        elif who == "payment":
+            state.payment_commit_ack = True
+
+        if state.stock_commit_ack and state.payment_commit_ack:
+            state.status = TwoPCStatus.COMPLETED
+
+        return state, state
+
+    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+    if not success or updated_state is None:
+        return
+
+    if updated_state.status == TwoPCStatus.COMPLETED:
+        await messaging.publish("order", {
+            "action": "set_completed",
+            "order_id": order_id,
+        })
+
+async def on_abort_ack(order_id: str, who: str):
+    key = get_2pc_key(order_id)
+
+    def modifier(state: TwoPCState):
+        if state is None:
+            return None, "missing"
+
+        if state.status != TwoPCStatus.ABORTING:
+            return state, state
+
+        if who == "stock":
+            state.stock_abort_ack = True
+        elif who == "payment":
+            state.payment_abort_ack = True
+
+        if state.stock_abort_ack and state.payment_abort_ack:
+            state.status = TwoPCStatus.FAILED
+
+        return state, state
+
+    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+    if not success or updated_state is None:
+        return
+
+    if updated_state.status == TwoPCStatus.FAILED:
+        await messaging.publish("order", {
+            "action": "set_failed",
+            "order_id": order_id,
+            "error": updated_state.error or "2PC aborted",
+        })
+
+async def handle_two_pc_cancel(order_id: str):
+    key = get_2pc_key(order_id)
+
+    def modifier(state: TwoPCState):
+        if state is None:
+            return None, "missing"
+
+        # Already finished → ignore
+        if state.status in (
+                TwoPCStatus.COMPLETED,
+                TwoPCStatus.FAILED,
+        ):
+            return state, state
+
+        # Already aborting → ignore
+        if state.status == TwoPCStatus.ABORTING:
+            return state, state
+
+        # If already committing → cannot cancel
+        if state.status == TwoPCStatus.COMMITTING:
+            return state, state
+
+        # Only valid case: PREPARING → ABORT
+        if state.status == TwoPCStatus.PREPARING:
+            state.status = TwoPCStatus.ABORTING
+            state.decision_ts = time.time()
+            state.error = "Cancelled, we failed"
+
+        return state, state
+
+    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+    if not success or updated_state is None:
+        return
+
+    # If we moved to ABORTING → send aborts
+    if updated_state.status == TwoPCStatus.ABORTING:
+        await messaging.publish("stock", {
+            "action": "stock_abort",
+            "order_id": order_id,
+        })
+        await messaging.publish("payment", {
+            "action": "payment_abort",
+            "order_id": order_id,
+        })
+
+async def recover_incomplete_2pc():
+    while not messaging.is_shutting_down():
+        try:
+            now = time.time()
+
+            async for key in db.scan_iter(match="2pc:*"):
+                raw = await db.get(key)
+                if not raw:
+                    continue
+
+                state = msgpack.decode(raw, type=TwoPCState)
+                age = now - (state.decision_ts or state.created_ts or now)
+
+                if state.status in (TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
+                    continue
+
+                if age < TWO_PC_RECOVERY_THRESHOLD:
+                    continue
+
+                order_id = state.order_id
+
+                # Case 1: stuck in PREPARING -> force ABORT
+                if state.status == TwoPCStatus.PREPARING:
+                    def modifier(current: TwoPCState):
+                        if current is None:
+                            return None, "missing"
+
+                        if current.status != TwoPCStatus.PREPARING:
+                            return current, "ignore"
+
+                        current.status = TwoPCStatus.ABORTING
+                        current.decision_ts = time.time()
+                        current.error = f"Recovered after timeout ({age:.0f}s)"
+                        return current, current
+
+                    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+                    if success and updated_state is not None and updated_state.status == TwoPCStatus.ABORTING:
+                        await messaging.publish("stock", {
+                            "action": "stock_abort",
+                            "order_id": order_id,
+                        })
+                        await messaging.publish("payment", {
+                            "action": "payment_abort",
+                            "order_id": order_id,
+                        })
+
+                # Case 2: stuck in ABORTING -> resend abort
+                elif state.status == TwoPCStatus.ABORTING:
+                    await messaging.publish("stock", {
+                        "action": "stock_abort",
+                        "order_id": order_id,
+                    })
+                    await messaging.publish("payment", {
+                        "action": "payment_abort",
+                        "order_id": order_id,
+                    })
+
+                # Case 3: stuck in COMMITTING -> resend commit
+                elif state.status == TwoPCStatus.COMMITTING:
+                    await messaging.publish("stock", {
+                        "action": "stock_commit",
+                        "order_id": order_id,
+                    })
+                    await messaging.publish("payment", {
+                        "action": "payment_commit",
+                        "order_id": order_id,
+                    })
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[orchestrator-recovery-2pc] error: {e}")
+
+        await asyncio.sleep(5)
+
 _worker_tasks: list[asyncio.Task] = []
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "6"))
 WORKER_DRAIN_TIMEOUT = 10
@@ -393,6 +763,8 @@ async def startup():
             _worker_tasks.append(task)
         if PROTOCOL == "SAGA":
             _worker_tasks.append(asyncio.create_task(recover_incomplete_saga(), name="saga-recovery"))
+        if PROTOCOL == "2PC":
+            _worker_tasks.append(asyncio.create_task(recover_incomplete_2pc(),  name="2pc-recovery"))
 
 @app.after_serving
 async def shutdown():

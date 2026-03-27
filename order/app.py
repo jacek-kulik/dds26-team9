@@ -15,8 +15,6 @@ from quart import Quart, jsonify, abort, Response
 import utils.messaging as messaging
 from utils.atomic import atomic_update
 
-PROTOCOL = os.getenv("PROTOCOL", "SAGA")
-
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
@@ -265,10 +263,10 @@ async def add_item(order_id: str, item_id: str, quantity: int):
 
 @app.post('/checkout/<order_id>')
 async def checkout(order_id: str):
-    return await saga_checkout(order_id)
+    return await orchestrated_checkout(order_id)
 
 
-async def saga_checkout(order_id: str):
+async def orchestrated_checkout(order_id: str):
     order_entry = await get_order_from_db(order_id)
     if order_entry is None:
         abort(499, f"Order: {order_id} not found!")
@@ -279,8 +277,12 @@ async def saga_checkout(order_id: str):
 
     items = list(items_quantities.items())
 
+    start_action = "checkout_start"
+    cancel_action = "checkout_cancel"
+    initial_status = Status.CHECKOUT_PENDING
+
     def modifier(order: OrderValue):
-        order.status = Status.CHECKOUT_PENDING
+        order.status = initial_status
         order.status_ts = time.time()
         order.error = ""
         return order, "ok"
@@ -290,7 +292,7 @@ async def saga_checkout(order_id: str):
         abort(405, f"Order: {order_id} not found!")
 
     await messaging.publish("orchestrator", {
-        "action": "saga_start",
+        "action": start_action,
         "order_id": order_id,
         "user_id": order_entry.user_id,
         "total_cost": str(order_entry.total_cost),
@@ -307,7 +309,7 @@ async def saga_checkout(order_id: str):
         return Response("Checkout failed", 407)
     else:
         await messaging.publish("orchestrator", {
-            "action": "saga_cancel",
+            "action": cancel_action,
             "order_id": order_id,
         })
         abort(408, "Checkout timed out")

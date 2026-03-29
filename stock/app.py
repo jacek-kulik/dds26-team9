@@ -1,6 +1,5 @@
 import logging
 import os
-import signal
 import time
 import uuid
 import asyncio
@@ -73,54 +72,15 @@ async def get_item_from_db(item_id: str) -> StockValue | None:
         abort(404, f"Item: {item_id} not found!")
     return entry
 
-async def handle_subtract(order_id: str, item_id: str, amount: int):
-    def modifier(it: StockValue):
-        new_stock = it.stock - amount
-        if new_stock < 0:
-            return None, f"Item: {item_id} out of stock!"
-        return StockValue(stock=new_stock, price=it.price), None
-
-    ok, err = await atomic_update(db, item_id, StockValue, modifier)
-
-    if not ok:
-        await messaging.publish("order", {
-            "action": "subtract_failed",
-            "order_id": order_id,
-            "item_id": item_id,
-            "error": err or f"Item: {item_id} not found!",
-        })
-        return
-
-    await messaging.publish("order", {
-        "action": "subtract_success",
-        "order_id": order_id,
-        "item_id": item_id,
-        "quantity": str(amount),
-    })
 
 
-async def handle_add(order_id: str, item_id: str, amount: int):
-    def modifier(it: StockValue):
-        return StockValue(stock=it.stock + amount, price=it.price), None
+"""
+                    ==== WARNING ====
+saga ops are basically the exact same as 2pc, left them separate for extendibility
+"""
 
-    ok, err = await atomic_update(db, item_id, StockValue, modifier)
 
-    if not ok:
-        await messaging.publish("order", {
-            "action": "rollback_failed",
-            "order_id": order_id,
-            "item_id": item_id,
-            "error": err or f"Item: {item_id} not found!",
-        })
-        return
-
-    await messaging.publish("order", {
-        "action": "rollback_success",
-        "order_id": order_id,
-        "item_id": item_id,
-    })
-
-async def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
+async def saga_subtract(order_id: str, items: list[tuple[str, int]]):
     tx_key = f"tx:{order_id}"
 
     raw = await db.get(tx_key)
@@ -128,7 +88,7 @@ async def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
         tx = msgpack.decode(raw, type=StockTx)
         if tx.state == "PREPARED":
             # Duplicate prepare for the current in-flight attempt → idempotent shortcut
-            await messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+            await messaging.publish("orchestrator", {"action": "subtract_success", "order_id": order_id})
             return
         # COMMITTED or ABORTED are terminal states from a *previous* checkout
         # attempt for this order.  Delete the stale key and re-evaluate fresh.
@@ -149,51 +109,30 @@ async def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
             # rollback already subtracted
             for rb_item, rb_amt in subtracted:
                 def rb_mod(it: StockValue):
-                    return StockValue(stock=it.stock + (rb_amt), price=it.price), None
+                    return StockValue(stock=it.stock + rb_amt, price=it.price), None
                 await atomic_update(db, rb_item, StockValue, rb_mod)
 
             await db.set(tx_key, msgpack.encode(StockTx(items=items, state="ABORTED", created_ts=time.time())))
-            await messaging.publish("order", {"action": "vote_no", "order_id": order_id, "who": "stock"})
+            await messaging.publish("orchestrator", {"action": "subtract_failed", "order_id": order_id})
             return
 
         subtracted.append((item_id, int(amount)))
 
     await db.set(tx_key, msgpack.encode(StockTx(items=items, state="PREPARED", created_ts=time.time())))
-    await messaging.publish("order", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+    await messaging.publish("orchestrator", {"action": "subtract_success", "order_id": order_id})
 
 
-async def handle_stock_commit(order_id: str):
+async def saga_rollback(order_id: str):
     tx_key = f"tx:{order_id}"
     raw = await db.get(tx_key)
     if not raw:
-        return
-
-    tx = msgpack.decode(raw, type=StockTx)
-
-    if tx.state == "COMMITTED":
-        await messaging.publish("order", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
-        return
-
-    if tx.state != "PREPARED":
-        return
-
-    tx.state = "COMMITTED"
-    await db.set(tx_key, msgpack.encode(tx))
-
-    await messaging.publish("order", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
-
-
-async def handle_stock_abort(order_id: str):
-    tx_key = f"tx:{order_id}"
-    raw = await db.get(tx_key)
-    if not raw:
-        await messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        await messaging.publish("orchestrator", {"action": "rolled_back", "order_id": order_id})
         return
 
     tx = msgpack.decode(raw, type=StockTx)
 
     if tx.state == "ABORTED":
-        await messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        await messaging.publish("orchestrator", {"action": "rolled_back", "order_id": order_id})
         return
 
     if tx.state != "PREPARED":
@@ -208,11 +147,101 @@ async def handle_stock_abort(order_id: str):
     tx.state = "ABORTED"
     await db.set(tx_key, msgpack.encode(tx))
 
-    await messaging.publish("order", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+    await messaging.publish("orchestrator", {"action": "rolled_back", "order_id": order_id})
+
+async def handle_stock_prepare(order_id: str, items: list[tuple[str, int]]):
+    tx_key = f"tx:{order_id}"
+
+    raw = await db.get(tx_key)
+    if raw:
+        tx = msgpack.decode(raw, type=StockTx)
+        if tx.state == "PREPARED":
+            # Duplicate prepare for the current in-flight attempt → idempotent shortcut
+            await messaging.publish("orchestrator", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+            return
+        # COMMITTED or ABORTED are terminal states from a *previous* checkout
+        # attempt for this order.  Delete the stale key and re-evaluate fresh.
+        await db.delete(tx_key)
+
+    # try subtract all; if partial success, undo
+    subtracted: list[tuple[str, int]] = []
+
+    for item_id, amount in items:
+        def modifier(it: StockValue, _amt=int(amount)):
+            new_stock = it.stock - _amt
+            if new_stock < 0:
+                return None, "out_of_stock"
+            return StockValue(stock=new_stock, price=it.price), None
+
+        ok, err = await atomic_update(db, item_id, StockValue, modifier)
+        if not ok:
+            # rollback already subtracted
+            for rb_item, rb_amt in subtracted:
+                def rb_mod(it: StockValue):
+                    return StockValue(stock=it.stock + rb_amt, price=it.price), None
+                await atomic_update(db, rb_item, StockValue, rb_mod)
+
+            await db.set(tx_key, msgpack.encode(StockTx(items=items, state="ABORTED", created_ts=time.time())))
+            await messaging.publish("orchestrator", {"action": "vote_no", "order_id": order_id, "who": "stock"})
+            return
+
+        subtracted.append((item_id, int(amount)))
+
+    await db.set(tx_key, msgpack.encode(StockTx(items=items, state="PREPARED", created_ts=time.time())))
+    await messaging.publish("orchestrator", {"action": "vote_yes", "order_id": order_id, "who": "stock"})
+
+
+async def handle_stock_commit(order_id: str):
+    tx_key = f"tx:{order_id}"
+    raw = await db.get(tx_key)
+    if not raw:
+        return
+
+    tx = msgpack.decode(raw, type=StockTx)
+
+    if tx.state == "COMMITTED":
+        await messaging.publish("orchestrator", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
+        return
+
+    if tx.state != "PREPARED":
+        return
+
+    tx.state = "COMMITTED"
+    await db.set(tx_key, msgpack.encode(tx))
+
+    await messaging.publish("orchestrator", {"action": "commit_ack", "order_id": order_id, "who": "stock"})
+
+
+async def handle_stock_abort(order_id: str):
+    tx_key = f"tx:{order_id}"
+    raw = await db.get(tx_key)
+    if not raw:
+        await messaging.publish("orchestrator", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        return
+
+    tx = msgpack.decode(raw, type=StockTx)
+
+    if tx.state == "ABORTED":
+        await messaging.publish("orchestrator", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
+        return
+
+    if tx.state != "PREPARED":
+        return
+
+    # undo the subtracts
+    for item_id, amount in tx.items:
+        def modifier(it: StockValue, _a=int(amount)):
+            return StockValue(stock=it.stock + _a, price=it.price), None
+        await atomic_update(db, item_id, StockValue, modifier)
+
+    tx.state = "ABORTED"
+    await db.set(tx_key, msgpack.encode(tx))
+
+    await messaging.publish("orchestrator", {"action": "abort_ack", "order_id": order_id, "who": "stock"})
 
 DISPATCH = {
-    "subtract": handle_subtract,
-    "add":      handle_add,
+    "saga_subtract": saga_subtract,
+    "saga_rollback": saga_rollback,
     "stock_prepare": handle_stock_prepare,
     "stock_commit":  handle_stock_commit,
     "stock_abort":   handle_stock_abort,
@@ -234,15 +263,16 @@ async def worker(worker_id: str):
                     items = msgpack.decode(items_raw)
                     await handler(order_id, items)
 
-                elif action in ("stock_commit", "stock_abort"):
+                elif action == "saga_subtract":
                     order_id = data.get(b"order_id", b"").decode()
-                    await handler(order_id)
+                    items_raw = data.get(b"items", b"")
+                    items = msgpack.decode(items_raw)
+                    await handler(order_id, items)
 
                 else:
+                    # stock_commit and stock_abort only need order_id
                     order_id = data.get(b"order_id", b"").decode()
-                    item_id  = data.get(b"item_id", b"").decode()
-                    amount   = int(data.get(b"amount", b"0") or b"0")
-                    await handler(order_id, item_id, amount)
+                    await handler(order_id)
 
             await messaging.ack("stock", msg_id)
 

@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,20 +10,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("worker-main")
 
-SERVICE_NAME = os.environ.get("SERVICE_NAME", "unknown")
-WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "orchestrator")
+WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "6"))
 
-#worker class, imports the worker loop functionality from the app
+
 async def main():
-    if SERVICE_NAME == "order":
-        from app import worker, db, messaging
-    elif SERVICE_NAME == "stock":
-        from app import worker, db, messaging
-    elif SERVICE_NAME == "payment":
-        from app import worker, db, messaging
-    else:
-        logger.error(f"Unknown SERVICE_NAME: {SERVICE_NAME}")
-        sys.exit(1)
+    from app import worker, db, messaging, PROTOCOL
+
+    if PROTOCOL == "SAGA":
+        from app import recover_incomplete_saga
 
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
@@ -46,6 +40,10 @@ async def main():
         tasks.append(t)
     logger.info(f"Started {WORKER_COUNT} consumer tasks for {SERVICE_NAME}")
 
+    if PROTOCOL == "SAGA":
+        t = asyncio.create_task(recover_incomplete_saga(), name="saga-recovery")
+        tasks.append(t)
+        logger.info("Saga recovery task started")
 
     await stop.wait()
 

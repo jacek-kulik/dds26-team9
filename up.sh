@@ -9,6 +9,7 @@ set -euo pipefail
 
 ORDER_WEB_REPLICAS="${ORDER_WEB_REPLICAS:-4}"
 ORDER_WORKER_REPLICAS="${ORDER_WORKER_REPLICAS:-4}"
+ORCH_WORKER_REPLICAS="${ORCH_WORKER_REPLICAS:-4}"
 STOCK_WEB_REPLICAS="${STOCK_WEB_REPLICAS:-2}"
 STOCK_WORKER_REPLICAS="${STOCK_WORKER_REPLICAS:-4}"
 USER_WEB_REPLICAS="${USER_WEB_REPLICAS:-2}"
@@ -18,10 +19,15 @@ DETACH="${DETACH:-1}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-cmd=(
-  docker compose up --build
+build_cmd=(
+  docker compose build --no-cache
+)
+
+up_cmd=(
+  docker compose up
   --scale "order-web=${ORDER_WEB_REPLICAS}"
   --scale "order-worker=${ORDER_WORKER_REPLICAS}"
+  --scale "orchestrator-worker=${ORCH_WORKER_REPLICAS}"
   --scale "stock-web=${STOCK_WEB_REPLICAS}"
   --scale "stock-worker=${STOCK_WORKER_REPLICAS}"
   --scale "user-web=${USER_WEB_REPLICAS}"
@@ -29,19 +35,23 @@ cmd=(
 )
 
 if [[ "${DETACH}" == "1" ]]; then
-  cmd+=( -d )
+  up_cmd+=( -d )
 fi
 
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-  printf 'DRY RUN: '
-  printf '%q ' "${cmd[@]}"
+  printf 'DRY RUN BUILD: '
+  printf '%q ' "${build_cmd[@]}"
+  printf '\n'
+  printf 'DRY RUN UP: '
+  printf '%q ' "${up_cmd[@]}"
   printf '\n'
   exit 0
 fi
 
 docker compose down --remove-orphans
 
-"${cmd[@]}"
+"${build_cmd[@]}"
+"${up_cmd[@]}"
 
 

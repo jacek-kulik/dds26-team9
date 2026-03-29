@@ -35,7 +35,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 512M
     volumes:
       - redis-master-data:/data
@@ -49,7 +49,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 512M
     volumes:
       - redis-replica-1-data:/data
@@ -65,7 +65,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 512M
     volumes:
       - redis-replica-2-data:/data
@@ -105,7 +105,6 @@ services:
     restart: always
     environment:
       - GATEWAY_URL=http://gateway:80
-      - PROTOCOL=SAGA
       - RUN_MODE=web
       - SERVICE_NAME=order
       - REDIS_HOST=redis-master
@@ -150,7 +149,6 @@ services:
     restart: always
     environment:
       - GATEWAY_URL=http://gateway:80
-      - PROTOCOL=SAGA
       - SERVICE_NAME=order
       - WORKER_COUNT=6
       - REDIS_HOST=redis-master
@@ -177,12 +175,48 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 256M
     depends_on:
       - redis-master
       - redis-sentinel-1
 
+  # ── Orchestrator: worker-only (no HTTP traffic, just health check) ─────────
+
+  orchestrator-worker:
+    build: ./orchestrator
+    image: orchestrator:latest
+    restart: unless-stopped
+    environment:
+      - PROTOCOL=SAGA
+      - SERVICE_NAME=orchestrator
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=4
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
 
   # ── Stock (scale with --scale stock-web=<n> / --scale stock-worker=<n>) ───
 
@@ -217,7 +251,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 256M
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
@@ -260,7 +294,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 256M
     depends_on:
       - redis-master
@@ -300,7 +334,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 256M
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
@@ -343,7 +377,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "0.25"
+          cpus: "1"
           memory: 256M
     depends_on:
       - redis-master

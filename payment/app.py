@@ -83,14 +83,14 @@ async def handle_pay(order_id: str, user_id: str, amount: int):
     ok, err = await atomic_update(db, user_id, UserValue, modifier)
 
     if not ok:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "pay_failed",
             "order_id": order_id,
             "error": err or f"User: {user_id} not found!",
         })
         return
 
-    await messaging.publish("order", {"action": "pay_success", "order_id": order_id})
+    await messaging.publish("orchestrator", {"action": "pay_success", "order_id": order_id})
 
 
 async def handle_refund(order_id: str, user_id: str, amount: int):
@@ -100,13 +100,13 @@ async def handle_refund(order_id: str, user_id: str, amount: int):
     ok, err = await atomic_update(db, user_id, UserValue, modifier)
 
     if not ok:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "refund_failed",
             "order_id": order_id,
             "error": err or f"User: {user_id} not found!",
         })
         return
-    await messaging.publish("order", {"action": "refund_success", "order_id": order_id})
+    await messaging.publish("orchestrator", {"action": "refund_success", "order_id": order_id})
 
 async def handle_prepare(order_id: str, user_id: str, amount: int):
     tx_key = f"tx:{order_id}"
@@ -116,7 +116,7 @@ async def handle_prepare(order_id: str, user_id: str, amount: int):
         tx = msgpack.decode(raw, type=PaymentTx)
 
         if tx.state == "PREPARED":
-            await messaging.publish("order", {
+            await messaging.publish("orchestrator", {
                 "action": "vote_yes",
                 "order_id": order_id,
                 "who": "payment",
@@ -131,7 +131,7 @@ async def handle_prepare(order_id: str, user_id: str, amount: int):
     user = await get_user_from_db(user_id)
 
     if user.credit < amount:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "vote_no",
             "order_id": order_id,
             "who": "payment",
@@ -143,7 +143,7 @@ async def handle_prepare(order_id: str, user_id: str, amount: int):
         PaymentTx(user_id=user_id, amount=amount, state="PREPARED", created_ts=time.time())
     ))
 
-    await messaging.publish("order", {
+    await messaging.publish("orchestrator", {
         "action": "vote_yes",
         "order_id": order_id,
         "who": "payment",
@@ -159,7 +159,7 @@ async def handle_commit(order_id: str):
     tx = msgpack.decode(raw, type=PaymentTx)
 
     if tx.state == "COMMITTED":
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "commit_ack",
             "order_id": order_id,
             "who": "payment",
@@ -177,7 +177,7 @@ async def handle_commit(order_id: str):
     tx.state = "COMMITTED"
     await db.set(tx_key, msgpack.encode(tx))
 
-    await messaging.publish("order", {
+    await messaging.publish("orchestrator", {
         "action": "commit_ack",
         "order_id": order_id,
         "who": "payment",
@@ -190,7 +190,7 @@ async def handle_abort(order_id: str):
     if not raw:
         # No tx record — we voted no before creating one, or it was already
         # cleaned up.  Still acknowledge so the coordinator collects all acks.
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "abort_ack",
             "order_id": order_id,
             "who": "payment",
@@ -200,7 +200,7 @@ async def handle_abort(order_id: str):
     tx = msgpack.decode(raw, type=PaymentTx)
 
     if tx.state == "ABORTED":
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "abort_ack",
             "order_id": order_id,
             "who": "payment",
@@ -210,7 +210,7 @@ async def handle_abort(order_id: str):
     tx.state = "ABORTED"
     await db.set(tx_key, msgpack.encode(tx))
 
-    await messaging.publish("order", {
+    await messaging.publish("orchestrator", {
         "action": "abort_ack",
         "order_id": order_id,
         "who": "payment",

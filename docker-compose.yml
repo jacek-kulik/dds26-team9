@@ -186,7 +186,7 @@ services:
   orchestrator-worker:
     build: ./orchestrator
     image: orchestrator:latest
-    restart: unless-stopped
+    restart: always
     environment:
       - PROTOCOL=SAGA
       - SERVICE_NAME=orchestrator
@@ -205,6 +205,8 @@ services:
       - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
       - BUS_REDIS_SENTINEL_PORT=26379
       - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
       resources:

@@ -109,8 +109,11 @@ async def publish(target_service: str, data: dict):
         await bus_db.xadd(stream, data, maxlen=STREAM_MAX_LEN, approximate=True)
 
 
-PEL_IDLE_MS = 30_000          # reclaim messages idle longer than 30 s
-PEL_CHECK_INTERVAL = 30.0     # seconds between reclaim sweeps
+PEL_TIMEOUT_SECONDS = float(os.getenv("PEL_TIMEOUT_SECONDS", 20.0))
+PEL_SEARCH_INTERVAL_SECONDS = float(os.getenv("PEL_SEARCH_INTERVAL_SECONDS", 3.0))
+
+PEL_IDLE_MS = int(PEL_TIMEOUT_SECONDS * 1000)  # reclaim messages idle longer than X s
+PEL_CHECK_INTERVAL = PEL_SEARCH_INTERVAL_SECONDS  # seconds between reclaim sweeps
 
 
 async def consume(service: str, worker_id: str, batch: int = 50):

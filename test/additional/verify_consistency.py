@@ -1,6 +1,6 @@
 import requests
 
-BASE = "http://localhost:8000"
+BASE = "http://localhost:5000"
 
 def verify(user_id="0", item_id="0", initial_credit=1000, initial_stock=100, price=10):
 

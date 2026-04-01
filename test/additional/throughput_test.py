@@ -6,7 +6,7 @@ from reset_state import reset
 
 reset()
 
-BASE = "http://localhost:8000"
+BASE = "http://localhost:5000"
 REQUESTS = 1000
 
 

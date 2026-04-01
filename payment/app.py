@@ -425,6 +425,13 @@ async def remove_credit(user_id: str, amount: int):
         abort(404, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {result}", status=200)
 
+@app.post("/reset")
+async def reset_db():
+    try:
+        await db.flushdb()
+        return jsonify({"status": "reset"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

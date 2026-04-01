@@ -320,6 +320,13 @@ async def orchestrated_checkout(order_id: str):
         })
         abort(408, "Checkout timed out")
 
+@app.post("/reset")
+async def reset_db():
+    try:
+        await db.flushdb()
+        return jsonify({"status": "reset"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

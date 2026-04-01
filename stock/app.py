@@ -456,6 +456,14 @@ async def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {result}", status=200)
 
 
+@app.post("/reset")
+async def reset_db():
+    try:
+        await db.flushdb()
+        return jsonify({"status": "reset"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:

@@ -74,6 +74,17 @@ async def get_user_from_db(user_id: str) -> UserValue | None:
     return entry
 
 async def handle_pay(order_id: str, user_id: str, amount: int):
+    tx_key = f"tx:{order_id}"
+
+    raw = await db.get(tx_key)
+    if raw:
+        tx = msgpack.decode(raw, type=PaymentTx)
+        if tx.state == "PAID":
+            await messaging.publish("orchestrator", {"action": "pay_success", "order_id": order_id})
+            return
+        if tx.state == "REFUNDED":
+            await db.delete(tx_key)
+
     def modifier(u: UserValue):
         new_credit = u.credit - amount
         if new_credit < 0:
@@ -84,16 +95,26 @@ async def handle_pay(order_id: str, user_id: str, amount: int):
 
     if not ok:
         await messaging.publish("orchestrator", {
-            "action": "pay_failed",
-            "order_id": order_id,
+            "action": "pay_failed", "order_id": order_id,
             "error": err or f"User: {user_id} not found!",
         })
         return
 
+    await db.set(tx_key,
+                 msgpack.encode(PaymentTx(user_id=user_id, amount=amount, state="PAID", created_ts=time.time())))
     await messaging.publish("orchestrator", {"action": "pay_success", "order_id": order_id})
 
 
 async def handle_refund(order_id: str, user_id: str, amount: int):
+    tx_key = f"tx:{order_id}"
+
+    raw = await db.get(tx_key)
+    if raw:
+        tx = msgpack.decode(raw, type=PaymentTx)
+        if tx.state == "REFUNDED":
+            await messaging.publish("orchestrator", {"action": "refund_success", "order_id": order_id})
+            return
+
     def modifier(u: UserValue):
         return UserValue(credit=u.credit + amount), None
 
@@ -101,11 +122,13 @@ async def handle_refund(order_id: str, user_id: str, amount: int):
 
     if not ok:
         await messaging.publish("orchestrator", {
-            "action": "refund_failed",
-            "order_id": order_id,
+            "action": "refund_failed", "order_id": order_id,
             "error": err or f"User: {user_id} not found!",
         })
         return
+
+    await db.set(tx_key,
+                 msgpack.encode(PaymentTx(user_id=user_id, amount=amount, state="REFUNDED", created_ts=time.time())))
     await messaging.publish("orchestrator", {"action": "refund_success", "order_id": order_id})
 
 async def handle_prepare(order_id: str, user_id: str, amount: int):

@@ -1,0 +1,392 @@
+services:
+  gateway:
+    image: nginx:1.25-bookworm
+    restart: always
+    volumes:
+      - ./gateway_nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "5000:80"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      order-web:
+        condition: service_healthy
+      stock-web:
+        condition: service_healthy
+      user-web:
+        condition: service_healthy
+
+  # ── Redis: 1 master + 2 replicas + 3 sentinels (matches K8s Helm chart) ───
+
+  redis-master:
+    image: redis:8.6
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 512mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 512M
+    volumes:
+      - redis-master-data:/data
+
+  redis-replica-1:
+    image: redis:8.6
+    command: redis-server --replicaof redis-master 6379 --requirepass redis --masterauth redis --maxmemory 512mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 512M
+    volumes:
+      - redis-replica-1-data:/data
+    depends_on:
+      - redis-master
+
+  redis-replica-2:
+    image: redis:8.6
+    command: redis-server --replicaof redis-master 6379 --requirepass redis --masterauth redis --maxmemory 512mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 512M
+    volumes:
+      - redis-replica-2-data:/data
+    depends_on:
+      - redis-master
+
+  redis-sentinel-1: &sentinel
+    image: redis:8.6
+    entrypoint: [ "/bin/sh", "/etc/redis/sentinel-entrypoint.sh" ]
+    volumes:
+      - ./sentinel.conf:/etc/redis/sentinel-ro.conf:ro
+      - ./sentinel-entrypoint.sh:/etc/redis/sentinel-entrypoint.sh:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    depends_on:
+      - redis-master
+      - redis-replica-1
+      - redis-replica-2
+
+  redis-sentinel-2:
+    <<: *sentinel
+
+  redis-sentinel-3:
+    <<: *sentinel
+
+  # ── Order (scale with --scale order-web=<n> / --scale order-worker=<n>) ───
+
+  order-web:
+    build: ./order
+    image: order:latest
+    restart: always
+    environment:
+      - GATEWAY_URL=http://gateway:80
+      - RUN_MODE=web
+      - SERVICE_NAME=order
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "1"
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+  order-worker:
+    build: ./order
+    image: order:latest
+    restart: always
+    environment:
+      - GATEWAY_URL=http://gateway:80
+      - SERVICE_NAME=order
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+  # ── Orchestrator: worker-only (no HTTP traffic, just health check) ─────────
+
+  orchestrator-worker:
+    build: ./orchestrator
+    image: orchestrator:latest
+    restart: always
+    environment:
+      - PROTOCOL=SAGA
+      - SERVICE_NAME=orchestrator
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=4
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+  # ── Stock (scale with --scale stock-web=<n> / --scale stock-worker=<n>) ───
+
+  stock-web:
+    build: ./stock
+    image: stock:latest
+    restart: always
+    environment:
+      - RUN_MODE=web
+      - SERVICE_NAME=stock
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+  stock-worker:
+    build: ./stock
+    image: stock:latest
+    restart: always
+    environment:
+      - SERVICE_NAME=stock
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=1
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+
+  # ── Payment (scale with --scale user-web=<n> / --scale user-worker=<n>) ───
+
+  user-web:
+    build: ./payment
+    image: user:latest
+    restart: always
+    environment:
+      - RUN_MODE=web
+      - SERVICE_NAME=payment
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=2
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+  user-worker:
+    build: ./payment
+    image: user:latest
+    restart: always
+    environment:
+      - SERVICE_NAME=payment
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-master
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=2
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=mymaster
+      - BUS_REDIS_HOST=redis-master
+      - BUS_REDIS_PORT=6379
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_DB=3
+      - BUS_REDIS_SENTINEL_HOST=redis-sentinel-1
+      - BUS_REDIS_SENTINEL_PORT=26379
+      - BUS_REDIS_SENTINEL_MASTER=mymaster
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-master
+      - redis-sentinel-1
+
+
+volumes:
+  redis-master-data:
+  redis-replica-1-data:
+  redis-replica-2-data:

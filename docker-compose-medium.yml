@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: nginx:1.25-bookworm
+    image: nginx:1.27-bookworm
     restart: always
     volumes:
       - ./gateway_nginx.conf:/etc/nginx/nginx.conf:ro
@@ -28,7 +28,7 @@ services:
 
   redis-master:
     image: redis:8.6
-    command: redis-server --requirepass redis --masterauth redis --maxmemory 512mb
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 512mb --io-threads 4 --io-threads-do-reads yes
     deploy:
       resources:
         limits:
@@ -126,6 +126,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
     deploy:
+      replicas: 12
       resources:
         limits:
           cpus: "1"
@@ -170,6 +171,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
+      replicas: 4
       resources:
         limits:
           cpus: "1"
@@ -209,6 +211,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
+      replicas: 12
       resources:
         limits:
           cpus: "1"
@@ -248,6 +251,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
     deploy:
+      replicas: 2
       resources:
         limits:
           cpus: "1"
@@ -291,6 +295,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
+      replicas: 4
       resources:
         limits:
           cpus: "1"
@@ -331,6 +336,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
     deploy:
+      replicas: 2
       resources:
         limits:
           cpus: "1"
@@ -374,6 +380,7 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
+      replicas: 2
       resources:
         limits:
           cpus: "1"

@@ -32,10 +32,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
+          cpus: "4"
           memory: 512M
         reservations:
-          cpus: "1"
+          cpus: "4"
           memory: 512M
     volumes:
       - redis-master-data:/data

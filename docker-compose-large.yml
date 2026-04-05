@@ -88,10 +88,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4"
+          cpus: "6"
           memory: 2G
         reservations:
-          cpus: "4"
+          cpus: "6"
           memory: 2G
     volumes:
       - redis-bus-data:/data

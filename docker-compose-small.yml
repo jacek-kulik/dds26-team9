@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  gateway:
+    image: nginx:1.25-bookworm
+    restart: always
+    volumes:
+      - ./gateway_nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "5000:80"
+    depends_on:
+      - order-web
+      - stock-web
+      - user-web
+
+  redis-master:
+    image: redis:8.6
+    command: redis-server --requirepass redis --masterauth redis
+
+  redis-replica-1:
+    image: redis:8.6
+    command: redis-server --replicaof redis-master 6379 --requirepass redis --masterauth redis
+    depends_on:
+      - redis-master
+
+  redis-replica-2:
+    image: redis:8.6
+    command: redis-server --replicaof redis-master 6379 --requirepass redis --masterauth redis
+    depends_on:
+      - redis-master
+
+  order-web:
+    build: ./order
+    environment:
+      - RUN_MODE=web
+    deploy:
+      replicas: 4
+
+  order-worker:
+    build: ./order
+    deploy:
+      replicas: 4
+
+  stock-web:
+    build: ./stock
+    deploy:
+      replicas: 2
+
+  stock-worker:
+    build: ./stock
+    deploy:
+      replicas: 4
+
+  user-web:
+    build: ./payment
+    deploy:
+      replicas: 2
+
+  user-worker:
+    build: ./payment
+    deploy:
+      replicas: 4

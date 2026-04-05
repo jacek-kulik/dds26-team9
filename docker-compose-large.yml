@@ -24,18 +24,18 @@ services:
       user-web:
         condition: service_healthy
 
-  # ── Redis: separate instance per service + dedicated bus ───────────────────
+  # ── Redis: one instance per service (data + its own stream) ────────────────
 
   redis-order:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb
+    command: redis-server --requirepass redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
     deploy:
       resources:
         limits:
-          cpus: "1"
+          cpus: "2"
           memory: 512M
         reservations:
-          cpus: "0.5"
+          cpus: "1"
           memory: 256M
     volumes:
       - redis-order-data:/data
@@ -70,33 +70,19 @@ services:
 
   redis-orchestrator:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb
+    command: redis-server --requirepass redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
     deploy:
       resources:
         limits:
-          cpus: "1"
+          cpus: "2"
           memory: 512M
         reservations:
-          cpus: "0.5"
+          cpus: "1"
           memory: 256M
     volumes:
       - redis-orchestrator-data:/data
 
-  redis-bus:
-    image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 1gb --io-threads 7 --io-threads-do-reads yes
-    deploy:
-      resources:
-        limits:
-          cpus: "6"
-          memory: 2G
-        reservations:
-          cpus: "6"
-          memory: 2G
-    volumes:
-      - redis-bus-data:/data
-
-  # ── Order (scale with --scale order-web=<n> / --scale order-worker=<n>) ───
+  # ── Order ──────────────────────────────────────────────────────────────────
 
   order-web:
     build: ./order
@@ -110,10 +96,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - ORDER_TIMEOUT_SECONDS=20.0
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
@@ -135,7 +124,7 @@ services:
       start_period: 20s
     depends_on:
       - redis-order
-      - redis-bus
+      - redis-orchestrator
 
   order-worker:
     build: ./order
@@ -149,10 +138,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - ORDER_TIMEOUT_SECONDS=20.0
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
@@ -168,9 +160,9 @@ services:
           memory: 256M
     depends_on:
       - redis-order
-      - redis-bus
+      - redis-orchestrator
 
-  # ── Orchestrator: worker-only (no HTTP traffic, just health check) ─────────
+  # ── Orchestrator ───────────────────────────────────────────────────────────
 
   orchestrator-worker:
     build: ./orchestrator
@@ -184,10 +176,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
@@ -202,9 +197,11 @@ services:
           memory: 256M
     depends_on:
       - redis-orchestrator
-      - redis-bus
+      - redis-order
+      - redis-stock
+      - redis-payment
 
-  # ── Stock (scale with --scale stock-web=<n> / --scale stock-worker=<n>) ───
+  # ── Stock ──────────────────────────────────────────────────────────────────
 
   stock-web:
     build: ./stock
@@ -217,10 +214,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - ORDER_TIMEOUT_SECONDS=20.0
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
@@ -242,7 +242,7 @@ services:
       start_period: 20s
     depends_on:
       - redis-stock
-      - redis-bus
+      - redis-orchestrator
 
   stock-worker:
     build: ./stock
@@ -255,10 +255,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - ORDER_TIMEOUT_SECONDS=20.0
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
@@ -274,10 +277,9 @@ services:
           memory: 256M
     depends_on:
       - redis-stock
-      - redis-bus
+      - redis-orchestrator
 
-
-  # ── Payment (scale with --scale user-web=<n> / --scale user-worker=<n>) ───
+  # ── Payment ────────────────────────────────────────────────────────────────
 
   user-web:
     build: ./payment
@@ -290,10 +292,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - ORDER_TIMEOUT_SECONDS=20.0
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
@@ -315,7 +320,7 @@ services:
       start_period: 20s
     depends_on:
       - redis-payment
-      - redis-bus
+      - redis-orchestrator
 
   user-worker:
     build: ./payment
@@ -328,10 +333,13 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
-      - BUS_REDIS_HOST=redis-bus
-      - BUS_REDIS_PORT=6379
-      - BUS_REDIS_PASSWORD=redis
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
       - ORDER_TIMEOUT_SECONDS=20.0
       - PEL_TIMEOUT_SECONDS=3.5
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
@@ -347,7 +355,7 @@ services:
           memory: 256M
     depends_on:
       - redis-payment
-      - redis-bus
+      - redis-orchestrator
 
 
 volumes:
@@ -355,4 +363,3 @@ volumes:
   redis-stock-data:
   redis-payment-data:
   redis-orchestrator-data:
-  redis-bus-data:

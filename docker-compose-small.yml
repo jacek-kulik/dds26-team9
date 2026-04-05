@@ -49,7 +49,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "1"
+          cpus: "0.25"
           memory: 512M
     volumes:
       - redis-replica-1-data:/data
@@ -65,7 +65,7 @@ services:
           cpus: "1"
           memory: 512M
         reservations:
-          cpus: "1"
+          cpus: "0.25"
           memory: 512M
     volumes:
       - redis-replica-2-data:/data

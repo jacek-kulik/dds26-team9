@@ -70,20 +70,6 @@ services:
 
   redis-orchestrator:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: 512M
-        reservations:
-          cpus: "0.5"
-          memory: 256M
-    volumes:
-      - redis-orchestrator-data:/data
-
-  redis-orchestrator-bus:
-    image: redis:8.6
     command: redis-server --requirepass redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
     deploy:
       resources:
@@ -94,7 +80,7 @@ services:
           cpus: "1"
           memory: 256M
     volumes:
-      - redis-orchestrator-bus-data:/data
+      - redis-orchestrator-data:/data
 
   # ── Order ──────────────────────────────────────────────────────────────────
 
@@ -113,7 +99,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -138,7 +124,7 @@ services:
       start_period: 20s
     depends_on:
       - redis-order
-      - redis-orchestrator-bus
+      - redis-orchestrator
 
   order-worker:
     build: ./order
@@ -155,7 +141,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -174,7 +160,7 @@ services:
           memory: 256M
     depends_on:
       - redis-order
-      - redis-orchestrator-bus
+      - redis-orchestrator
 
   # ── Orchestrator ───────────────────────────────────────────────────────────
 
@@ -193,7 +179,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -211,7 +197,6 @@ services:
           memory: 256M
     depends_on:
       - redis-orchestrator
-      - redis-orchestrator-bus
       - redis-order
       - redis-stock
       - redis-payment
@@ -232,7 +217,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -257,7 +242,7 @@ services:
       start_period: 20s
     depends_on:
       - redis-stock
-      - redis-orchestrator-bus
+      - redis-orchestrator
 
   stock-worker:
     build: ./stock
@@ -273,7 +258,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -292,7 +277,7 @@ services:
           memory: 256M
     depends_on:
       - redis-stock
-      - redis-orchestrator-bus
+      - redis-orchestrator
 
   # ── Payment ────────────────────────────────────────────────────────────────
 
@@ -310,7 +295,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -335,7 +320,7 @@ services:
       start_period: 20s
     depends_on:
       - redis-payment
-      - redis-orchestrator-bus
+      - redis-orchestrator
 
   user-worker:
     build: ./payment
@@ -351,7 +336,7 @@ services:
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
-      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator-bus
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
       - BUS_REDIS_DB=0
       - BUS_REDIS_PASSWORD=redis
       - BUS_REDIS_PORT=6379
@@ -370,7 +355,7 @@ services:
           memory: 256M
     depends_on:
       - redis-payment
-      - redis-orchestrator-bus
+      - redis-orchestrator
 
 
 volumes:
@@ -378,4 +363,3 @@ volumes:
   redis-stock-data:
   redis-payment-data:
   redis-orchestrator-data:
-  redis-orchestrator-bus-data:

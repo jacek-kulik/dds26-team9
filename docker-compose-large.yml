@@ -84,15 +84,15 @@ services:
 
   redis-bus:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 512mb --io-threads 3 --io-threads-do-reads yes
+    command: redis-server --requirepass redis --maxmemory 1gb --io-threads 7 --io-threads-do-reads yes
     deploy:
       resources:
         limits:
           cpus: "4"
-          memory: 1G
+          memory: 2G
         reservations:
-          cpus: "3"
-          memory: 512M
+          cpus: "4"
+          memory: 2G
     volumes:
       - redis-bus-data:/data
 

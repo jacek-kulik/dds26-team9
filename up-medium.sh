@@ -7,7 +7,7 @@ set -euo pipefail
 # Set DETACH=1 to run in the background (-d).
 # Use DRY_RUN=1 to print the command without executing it.
 
-COMPOSE_FILE="docker-compose.yml"
+COMPOSE_FILE="docker-compose-medium.yml"
 
 ORDER_WEB_REPLICAS="${ORDER_WEB_REPLICAS:-6}"
 ORDER_WORKER_REPLICAS="${ORDER_WORKER_REPLICAS:-2}"

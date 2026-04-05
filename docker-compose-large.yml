@@ -108,7 +108,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
     deploy:
-      replicas: 25
       resources:
         limits:
           cpus: "1"
@@ -150,7 +149,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
-      replicas: 8
       resources:
         limits:
           cpus: "1"
@@ -187,7 +185,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
-      replicas: 25
       resources:
         limits:
           cpus: "1"
@@ -226,7 +223,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
     deploy:
-      replicas: 4
       resources:
         limits:
           cpus: "1"
@@ -267,7 +263,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
-      replicas: 8
       resources:
         limits:
           cpus: "1"
@@ -304,7 +299,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
     deploy:
-      replicas: 4
       resources:
         limits:
           cpus: "1"
@@ -345,7 +339,6 @@ services:
       - PEL_SEARCH_INTERVAL_SECONDS=2.0
     command: python worker_main.py
     deploy:
-      replicas: 4
       resources:
         limits:
           cpus: "1"

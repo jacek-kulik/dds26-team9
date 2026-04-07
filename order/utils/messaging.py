@@ -44,6 +44,13 @@ _SERVICE_REDIS_HOST_VARS = {
     "orchestrator": "REDIS_ORCHESTRATOR_HOST",
 }
 
+_SERVICE_SENTINEL_MASTERS = {
+    "order":        "order-master",
+    "stock":        "stock-master",
+    "payment":      "payment-master",
+    "orchestrator": "orchestrator-master",
+}
+
 _DEFAULT_PASSWORD = os.environ.get("BUS_REDIS_PASSWORD",
                     os.environ.get("REDIS_PASSWORD", "redis"))
 _DEFAULT_PORT = int(os.environ.get("BUS_REDIS_PORT",
@@ -56,25 +63,13 @@ def _get_bus_client(target_service: str) -> aioredis.Redis:
     if target_service in _bus_clients:
         return _bus_clients[target_service]
 
-    shared_bus_host = os.environ.get("BUS_REDIS_HOST")
-    host_var = _SERVICE_REDIS_HOST_VARS.get(target_service)
-    target_host = os.environ.get(host_var) if host_var else None
+    db_num = int(os.environ.get("BUS_REDIS_DB", "0"))
 
-    if target_host:
-        host = target_host
-        db_num = int(os.environ.get("BUS_REDIS_DB", "0"))
-    elif shared_bus_host:
-        host = shared_bus_host
-        db_num = int(os.environ.get("BUS_REDIS_DB", "0"))
-    else:
-        host = os.environ.get("REDIS_HOST", "localhost")
-        db_num = int(os.environ.get("BUS_REDIS_DB",
-                     os.environ.get("REDIS_DB", "0")))
-
-    sentinel_host = os.environ.get("BUS_REDIS_SENTINEL_HOST")
+    sentinel_host = os.environ.get("BUS_REDIS_SENTINEL_HOST", os.environ.get("REDIS_SENTINEL_HOST"))
     if sentinel_host:
-        sentinel_port = int(os.environ.get("BUS_REDIS_SENTINEL_PORT", "26379"))
-        master_name = os.environ.get("BUS_REDIS_SENTINEL_MASTER", "mymaster")
+        sentinel_port = int(os.environ.get("BUS_REDIS_SENTINEL_PORT",
+                            os.environ.get("REDIS_SENTINEL_PORT", "26379")))
+        master_name = _SERVICE_SENTINEL_MASTERS.get(target_service, "mymaster")
         sentinel = aioredis.Sentinel(
             [(sentinel_host, sentinel_port)],
             sentinel_kwargs={"password": _DEFAULT_PASSWORD},
@@ -84,15 +79,30 @@ def _get_bus_client(target_service: str) -> aioredis.Redis:
             retry_on_timeout=True,
         )
         client = sentinel.master_for(master_name)
+        _bus_clients[target_service] = client
+        logger.info(f"[{_SERVICE_NAME}] Bus connection to '{target_service}' via sentinel "
+                    f"{sentinel_host}:{sentinel_port} master={master_name}")
+        return client
+
+    host_var = _SERVICE_REDIS_HOST_VARS.get(target_service)
+    target_host = os.environ.get(host_var) if host_var else None
+
+    if target_host:
+        host = target_host
+    elif os.environ.get("BUS_REDIS_HOST"):
+        # Mode 3: Shared bus fallback
+        host = os.environ["BUS_REDIS_HOST"]
     else:
-        client = aioredis.Redis(
-            host=host,
-            port=_DEFAULT_PORT,
-            password=_DEFAULT_PASSWORD,
-            db=db_num,
-            socket_timeout=5,
-            retry_on_timeout=True,
-        )
+        host = os.environ.get("REDIS_HOST", "localhost")
+
+    client = aioredis.Redis(
+        host=host,
+        port=_DEFAULT_PORT,
+        password=_DEFAULT_PASSWORD,
+        db=db_num,
+        socket_timeout=5,
+        retry_on_timeout=True,
+    )
 
     _bus_clients[target_service] = client
     logger.info(f"[{_SERVICE_NAME}] Bus connection to '{target_service}' → {host}:{_DEFAULT_PORT}/{db_num}")

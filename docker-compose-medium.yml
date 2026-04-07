@@ -146,6 +146,38 @@ services:
     depends_on:
       - redis-orchestrator
 
+  # ── Sentinels: one group monitoring all 4 masters ──────────────────────────
+
+  redis-sentinel-1: &sentinel
+    image: redis:8.6
+    entrypoint: [ "/bin/sh", "/etc/redis/sentinel-entrypoint.sh" ]
+    volumes:
+      - ./sentinel.conf:/etc/redis/sentinel-ro.conf:ro
+      - ./sentinel-entrypoint.sh:/etc/redis/sentinel-entrypoint.sh:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    depends_on:
+      - redis-order
+      - redis-order-replica
+      - redis-stock
+      - redis-stock-replica
+      - redis-payment
+      - redis-payment-replica
+      - redis-orchestrator
+      - redis-orchestrator-replica
+
+  redis-sentinel-2:
+    <<: *sentinel
+
+  redis-sentinel-3:
+    <<: *sentinel
+
   # ── Order ──────────────────────────────────────────────────────────────────
 
   order-web:
@@ -160,6 +192,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=order-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
@@ -201,6 +236,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=order-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
@@ -237,6 +275,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=orchestrator-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
@@ -273,6 +314,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=stock-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
@@ -313,6 +357,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=stock-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
@@ -347,6 +394,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=payment-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment
@@ -387,6 +437,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=redis
       - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=payment-master
       - REDIS_ORDER_HOST=redis-order
       - REDIS_STOCK_HOST=redis-stock
       - REDIS_PAYMENT_HOST=redis-payment

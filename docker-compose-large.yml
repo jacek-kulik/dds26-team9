@@ -1,0 +1,479 @@
+services:
+  gateway:
+    image: nginx:1.27-bookworm
+    restart: always
+    volumes:
+      - ./gateway_nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "5000:80"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      order-web:
+        condition: service_healthy
+      stock-web:
+        condition: service_healthy
+      user-web:
+        condition: service_healthy
+
+  # ── Redis: one instance per service (data + its own stream) ────────────────
+
+  redis-order:
+    image: redis:8.6
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    volumes:
+      - redis-order-data:/data
+
+  redis-order-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-order 6379 --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-order-replica-data:/data
+    depends_on:
+      - redis-order
+
+  redis-stock:
+    image: redis:8.6
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    volumes:
+      - redis-stock-data:/data
+
+  redis-stock-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-stock 6379 --requirepass redis --masterauth redis --maxmemory 256mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-stock-replica-data:/data
+    depends_on:
+      - redis-stock
+
+  redis-payment:
+    image: redis:8.6
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    volumes:
+      - redis-payment-data:/data
+
+  redis-payment-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-payment 6379 --requirepass redis --masterauth redis --maxmemory 256mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-payment-replica-data:/data
+    depends_on:
+      - redis-payment
+
+  redis-orchestrator:
+    image: redis:8.6
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    volumes:
+      - redis-orchestrator-data:/data
+
+  redis-orchestrator-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-orchestrator 6379 --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-orchestrator-replica-data:/data
+    depends_on:
+      - redis-orchestrator
+
+  # ── Sentinels: one group monitoring all 4 masters ──────────────────────────
+
+  redis-sentinel-1: &sentinel
+    image: redis:8.6
+    entrypoint: [ "/bin/sh", "/etc/redis/sentinel-entrypoint.sh" ]
+    volumes:
+      - ./sentinel.conf:/etc/redis/sentinel-ro.conf:ro
+      - ./sentinel-entrypoint.sh:/etc/redis/sentinel-entrypoint.sh:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    depends_on:
+      - redis-order
+      - redis-order-replica
+      - redis-stock
+      - redis-stock-replica
+      - redis-payment
+      - redis-payment-replica
+      - redis-orchestrator
+      - redis-orchestrator-replica
+
+  redis-sentinel-2:
+    <<: *sentinel
+
+  redis-sentinel-3:
+    <<: *sentinel
+
+  # ── Order ──────────────────────────────────────────────────────────────────
+
+  order-web:
+    build: ./order
+    image: order:latest
+    restart: always
+    environment:
+      - GATEWAY_URL=http://gateway:80
+      - RUN_MODE=web
+      - SERVICE_NAME=order
+      - REDIS_HOST=redis-order
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=order-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "1"
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - redis-order
+      - redis-orchestrator
+
+  order-worker:
+    build: ./order
+    image: order:latest
+    restart: always
+    environment:
+      - GATEWAY_URL=http://gateway:80
+      - SERVICE_NAME=order
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-order
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=order-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-order
+      - redis-orchestrator
+
+  # ── Orchestrator ───────────────────────────────────────────────────────────
+
+  orchestrator-worker:
+    build: ./orchestrator
+    image: orchestrator:latest
+    restart: always
+    environment:
+      - PROTOCOL=SAGA
+      - SERVICE_NAME=orchestrator
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-orchestrator
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=orchestrator-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-orchestrator
+      - redis-order
+      - redis-stock
+      - redis-payment
+
+  # ── Stock ──────────────────────────────────────────────────────────────────
+
+  stock-web:
+    build: ./stock
+    image: stock:latest
+    restart: always
+    environment:
+      - RUN_MODE=web
+      - SERVICE_NAME=stock
+      - REDIS_HOST=redis-stock
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=stock-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - redis-stock
+      - redis-orchestrator
+
+  stock-worker:
+    build: ./stock
+    image: stock:latest
+    restart: always
+    environment:
+      - SERVICE_NAME=stock
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-stock
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=stock-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-stock
+      - redis-orchestrator
+
+  # ── Payment ────────────────────────────────────────────────────────────────
+
+  user-web:
+    build: ./payment
+    image: user:latest
+    restart: always
+    environment:
+      - RUN_MODE=web
+      - SERVICE_NAME=payment
+      - REDIS_HOST=redis-payment
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=payment-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: hypercorn -b 0.0.0.0:5000 -w 6 --graceful-timeout 30 --log-level warn app:app
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).getcode()==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - redis-payment
+      - redis-orchestrator
+
+  user-worker:
+    build: ./payment
+    image: user:latest
+    restart: always
+    environment:
+      - SERVICE_NAME=payment
+      - WORKER_COUNT=6
+      - REDIS_HOST=redis-payment
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=redis
+      - REDIS_DB=0
+      - REDIS_SENTINEL_HOST=redis-sentinel-1
+      - REDIS_SENTINEL_PORT=26379
+      - REDIS_SENTINEL_MASTER=payment-master
+      - REDIS_ORDER_HOST=redis-order
+      - REDIS_STOCK_HOST=redis-stock
+      - REDIS_PAYMENT_HOST=redis-payment
+      - REDIS_ORCHESTRATOR_HOST=redis-orchestrator
+      - BUS_REDIS_DB=0
+      - BUS_REDIS_PASSWORD=redis
+      - BUS_REDIS_PORT=6379
+      - ORDER_TIMEOUT_SECONDS=20.0
+      - PEL_TIMEOUT_SECONDS=3.5
+      - PEL_SEARCH_INTERVAL_SECONDS=2.0
+    command: python worker_main.py
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "1"
+          memory: 256M
+    depends_on:
+      - redis-payment
+      - redis-orchestrator
+
+
+volumes:
+  redis-order-data:
+  redis-order-replica-data:
+  redis-stock-data:
+  redis-stock-replica-data:
+  redis-payment-data:
+  redis-payment-replica-data:
+  redis-orchestrator-data:
+  redis-orchestrator-replica-data:

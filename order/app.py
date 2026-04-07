@@ -106,7 +106,7 @@ async def get_order_from_db(order_id: str) -> OrderValue | None:
         abort(400, f"Order: {order_id} not found!")
     return entry
 
-async def get_order_status(order_id: str, timeout: float = None, interval: float = 0.1) -> OrderValue | None:
+async def get_order_status(order_id: str, timeout: float = None, interval: float = 0.5) -> OrderValue | None:
     if timeout is None:
         timeout = ORDER_TIMEOUT_SECONDS
     deadline = time.time() + timeout

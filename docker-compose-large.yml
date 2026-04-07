@@ -28,7 +28,7 @@ services:
 
   redis-order:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
     deploy:
       resources:
         limits:
@@ -40,9 +40,25 @@ services:
     volumes:
       - redis-order-data:/data
 
+  redis-order-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-order 6379 --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-order-replica-data:/data
+    depends_on:
+      - redis-order
+
   redis-stock:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb
     deploy:
       resources:
         limits:
@@ -54,9 +70,25 @@ services:
     volumes:
       - redis-stock-data:/data
 
+  redis-stock-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-stock 6379 --requirepass redis --masterauth redis --maxmemory 256mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-stock-replica-data:/data
+    depends_on:
+      - redis-stock
+
   redis-payment:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb
     deploy:
       resources:
         limits:
@@ -68,9 +100,25 @@ services:
     volumes:
       - redis-payment-data:/data
 
+  redis-payment-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-payment 6379 --requirepass redis --masterauth redis --maxmemory 256mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-payment-replica-data:/data
+    depends_on:
+      - redis-payment
+
   redis-orchestrator:
     image: redis:8.6
-    command: redis-server --requirepass redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    command: redis-server --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
     deploy:
       resources:
         limits:
@@ -81,6 +129,22 @@ services:
           memory: 256M
     volumes:
       - redis-orchestrator-data:/data
+
+  redis-orchestrator-replica:
+    image: redis:8.6
+    command: redis-server --replicaof redis-orchestrator 6379 --requirepass redis --masterauth redis --maxmemory 256mb --io-threads 2 --io-threads-do-reads yes
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    volumes:
+      - redis-orchestrator-replica-data:/data
+    depends_on:
+      - redis-orchestrator
 
   # ── Order ──────────────────────────────────────────────────────────────────
 
@@ -353,6 +417,10 @@ services:
 
 volumes:
   redis-order-data:
+  redis-order-replica-data:
   redis-stock-data:
+  redis-stock-replica-data:
   redis-payment-data:
+  redis-payment-replica-data:
   redis-orchestrator-data:
+  redis-orchestrator-replica-data:

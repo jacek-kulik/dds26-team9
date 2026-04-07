@@ -11,6 +11,7 @@ import redis.exceptions as redis_exceptions
 import httpx
 from msgspec import msgpack, Struct, field
 from quart import Quart, jsonify, abort, Response
+import traceback
 
 import utils.messaging as messaging
 from utils.atomic import atomic_update
@@ -23,6 +24,9 @@ GATEWAY_URL = os.environ['GATEWAY_URL']
 app = Quart("order-service")
 
 _http: httpx.AsyncClient | None = None
+
+
+ORDER_TIMEOUT_SECONDS = float(os.getenv("ORDER_TIMEOUT_SECONDS", 10.0))
 
 def _make_redis_client(host_var='REDIS_HOST', port_var='REDIS_PORT',
                        password_var='REDIS_PASSWORD', db_var='REDIS_DB',
@@ -102,7 +106,9 @@ async def get_order_from_db(order_id: str) -> OrderValue | None:
         abort(400, f"Order: {order_id} not found!")
     return entry
 
-async def get_order_status(order_id: str, timeout: float = 10.0, interval: float = 0.1) -> OrderValue | None:
+async def get_order_status(order_id: str, timeout: float = None, interval: float = 0.5) -> OrderValue | None:
+    if timeout is None:
+        timeout = ORDER_TIMEOUT_SECONDS
     deadline = time.time() + timeout
     while time.time() < deadline:
         order = await get_order_from_db(order_id)
@@ -159,7 +165,7 @@ RUN_MODE = os.environ.get("RUN_MODE", "web")
 @app.before_serving
 async def startup():
     global _http
-    _http = httpx.AsyncClient(timeout=10.0)
+    _http = httpx.AsyncClient(timeout=ORDER_TIMEOUT_SECONDS)
 
     if RUN_MODE != "web":
         # Only spawn consumers if its not a web pod
@@ -269,7 +275,7 @@ async def checkout(order_id: str):
 async def orchestrated_checkout(order_id: str):
     order_entry = await get_order_from_db(order_id)
     if order_entry is None:
-        abort(499, f"Order: {order_id} not found!")
+        abort(404, f"Order: {order_id} not found!")
 
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
@@ -289,7 +295,7 @@ async def orchestrated_checkout(order_id: str):
 
     success, _ = await atomic_update(db, order_id, OrderValue, modifier)
     if not success:
-        abort(405, f"Order: {order_id} not found!")
+        abort(404, f"Order: {order_id} not found!")
 
     await messaging.publish("orchestrator", {
         "action": start_action,
@@ -299,9 +305,9 @@ async def orchestrated_checkout(order_id: str):
         "items": msgpack.encode(items),
     })
 
-    order_entry = await get_order_status(order_id, timeout=10.0)
+    order_entry = await get_order_status(order_id, timeout=ORDER_TIMEOUT_SECONDS)
     if order_entry is None:
-        abort(406, DB_ERROR_STR)
+        abort(404, DB_ERROR_STR)
 
     if order_entry.status == Status.COMPLETED:
         return Response("Checkout successful", status=200)
@@ -314,6 +320,13 @@ async def orchestrated_checkout(order_id: str):
         })
         abort(408, "Checkout timed out")
 
+@app.post("/reset")
+async def reset_db():
+    try:
+        await db.flushdb()
+        return jsonify({"status": "reset"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

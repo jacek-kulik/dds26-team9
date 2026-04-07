@@ -1,1 +1,4 @@
-docker stop $(docker ps -q)
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker compose down

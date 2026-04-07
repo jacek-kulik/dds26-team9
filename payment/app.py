@@ -80,7 +80,7 @@ async def handle_pay(order_id: str, user_id: str, amount: int):
     if raw:
         tx = msgpack.decode(raw, type=PaymentTx)
         if tx.state == "PAID":
-            await messaging.publish("order", {"action": "pay_success", "order_id": order_id})
+            await messaging.publish("orchestrator", {"action": "pay_success", "order_id": order_id})
             return
         if tx.state == "REFUNDED":
             await db.delete(tx_key)
@@ -94,7 +94,7 @@ async def handle_pay(order_id: str, user_id: str, amount: int):
     ok, err = await atomic_update(db, user_id, UserValue, modifier)
 
     if not ok:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "pay_failed", "order_id": order_id,
             "error": err or f"User: {user_id} not found!",
         })
@@ -102,7 +102,7 @@ async def handle_pay(order_id: str, user_id: str, amount: int):
 
     await db.set(tx_key,
                  msgpack.encode(PaymentTx(user_id=user_id, amount=amount, state="PAID", created_ts=time.time())))
-    await messaging.publish("order", {"action": "pay_success", "order_id": order_id})
+    await messaging.publish("orchestrator", {"action": "pay_success", "order_id": order_id})
 
 
 async def handle_refund(order_id: str, user_id: str, amount: int):
@@ -112,7 +112,7 @@ async def handle_refund(order_id: str, user_id: str, amount: int):
     if raw:
         tx = msgpack.decode(raw, type=PaymentTx)
         if tx.state == "REFUNDED":
-            await messaging.publish("order", {"action": "refund_success", "order_id": order_id})
+            await messaging.publish("orchestrator", {"action": "refund_success", "order_id": order_id})
             return
 
     def modifier(u: UserValue):
@@ -121,7 +121,7 @@ async def handle_refund(order_id: str, user_id: str, amount: int):
     ok, err = await atomic_update(db, user_id, UserValue, modifier)
 
     if not ok:
-        await messaging.publish("order", {
+        await messaging.publish("orchestrator", {
             "action": "refund_failed", "order_id": order_id,
             "error": err or f"User: {user_id} not found!",
         })
@@ -129,8 +129,7 @@ async def handle_refund(order_id: str, user_id: str, amount: int):
 
     await db.set(tx_key,
                  msgpack.encode(PaymentTx(user_id=user_id, amount=amount, state="REFUNDED", created_ts=time.time())))
-    await messaging.publish("order", {"action": "refund_success", "order_id": order_id})
-
+    await messaging.publish("orchestrator", {"action": "refund_success", "order_id": order_id})
 
 async def handle_prepare(order_id: str, user_id: str, amount: int):
     tx_key = f"tx:{order_id}"
@@ -428,7 +427,7 @@ async def add_credit(user_id: str, amount: int):
 
     success, new_credit = await atomic_update(db, user_id, UserValue, modifier)
     if not success:
-        abort(408, f"User: {user_id} not found!")
+        abort(404, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {new_credit}", status=200)
 
 
@@ -445,10 +444,17 @@ async def remove_credit(user_id: str, amount: int):
     success, result = await atomic_update(db, user_id, UserValue, modifier)
     if not success:
         if result:
-            abort(409, result)
-        abort(409, f"User: {user_id} not found!")
+            abort(400, result)
+        abort(404, f"User: {user_id} not found!")
     return Response(f"User: {user_id} credit updated to: {result}", status=200)
 
+@app.post("/reset")
+async def reset_db():
+    try:
+        await db.flushdb()
+        return jsonify({"status": "reset"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

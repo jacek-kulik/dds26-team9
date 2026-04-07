@@ -19,6 +19,8 @@ async def main():
 
     if PROTOCOL == "SAGA":
         from app import recover_incomplete_saga
+    elif PROTOCOL == "2PC":
+        from app import recover_incomplete_2pc
 
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
@@ -44,6 +46,11 @@ async def main():
         t = asyncio.create_task(recover_incomplete_saga(), name="saga-recovery")
         tasks.append(t)
         logger.info("Saga recovery task started")
+
+    elif PROTOCOL == "2PC":
+        t = asyncio.create_task(recover_incomplete_2pc(), name="2pc-recovery")
+        tasks.append(t)
+        logger.info("2PC recovery task started")
 
     await stop.wait()
 

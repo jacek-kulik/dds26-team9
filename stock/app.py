@@ -64,12 +64,12 @@ async def get_item_from_db(item_id: str) -> StockValue | None:
     try:
         entry: bytes = await db.get(item_id)
     except redis_exceptions.RedisError:
-        return abort(410, DB_ERROR_STR)
+        return abort(400, DB_ERROR_STR)
     # deserialize data if it exists else return null
     entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
     if entry is None:
         # if item does not exist in the database; abort
-        abort(410, f"Item: {item_id} not found!")
+        abort(404, f"Item: {item_id} not found!")
     return entry
 
 
@@ -399,7 +399,7 @@ async def create_item(price: int):
     try:
         await db.set(key, value)
     except redis_exceptions.RedisError:
-        return abort(411, DB_ERROR_STR)
+        return abort(500, DB_ERROR_STR)
     return jsonify({'item_id': key})
 
 
@@ -413,7 +413,7 @@ async def batch_init_users(n: int, starting_stock: int, item_price: int):
     try:
         await db.mset(kv_pairs)
     except redis_exceptions.RedisError:
-        return abort(412, DB_ERROR_STR)
+        return abort(500, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for stock successful"})
 
 
@@ -436,7 +436,7 @@ async def add_stock(item_id: str, amount: int):
 
     success, new_stock = await atomic_update(db, item_id, StockValue, modifier)
     if not success:
-        abort(413, f"Item: {item_id} not found!")
+        abort(404, f"Item: {item_id} not found!")
     return Response(f"Item: {item_id} stock updated to: {new_stock}", status=200)
 
 
@@ -451,10 +451,18 @@ async def remove_stock(item_id: str, amount: int):
     success, result = await atomic_update(db, item_id, StockValue, modifier)
     if not success:
         if result:
-            abort(414, result)
-        abort(414, f"Item: {item_id} not found!")
+            abort(404, result)
+        abort(404, f"Item: {item_id} not found!")
     return Response(f"Item: {item_id} stock updated to: {result}", status=200)
 
+
+@app.post("/reset")
+async def reset_db():
+    try:
+        await db.flushdb()
+        return jsonify({"status": "reset"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

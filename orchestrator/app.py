@@ -5,7 +5,7 @@ import asyncio
 from enum import Enum
 import redis.asyncio as aioredis
 import redis.exceptions as redis_exceptions
-from msgspec import msgpack, Struct, field
+from msgspec import msgpack, Struct
 from quart import Quart, jsonify
 
 import utils.messaging as messaging
@@ -75,6 +75,7 @@ class SagaState(Struct):
 
     error: str = ""
     created_ts: float = 0.0
+    updated_ts: float = 0.0
 
 class TwoPCState(Struct):
     order_id: str
@@ -100,17 +101,47 @@ class TwoPCState(Struct):
     error: str = ""
     created_ts: float = 0.0
     decision_ts: float = 0.0
+    updated_ts: float = 0.0
 
 def get_2pc_key(order_id: str) -> str:
     return f"2pc:{order_id}"
 
+
+SAGA_RECOVERY_INDEX = "saga:pending"
+TWO_PC_RECOVERY_INDEX = "2pc:pending"
+
+
+async def _track_saga(order_id: str, score: float):
+    await db.zadd(SAGA_RECOVERY_INDEX, {order_id: score})
+
+
+async def _untrack_saga(order_id: str):
+    await db.zrem(SAGA_RECOVERY_INDEX, order_id)
+
+
+async def _track_two_pc(order_id: str, score: float):
+    await db.zadd(TWO_PC_RECOVERY_INDEX, {order_id: score})
+
+
+async def _untrack_two_pc(order_id: str):
+    await db.zrem(TWO_PC_RECOVERY_INDEX, order_id)
+
+
+async def _get_due_recovery_ids(index_key: str, cutoff_ts: float, limit: int = 100) -> list[str]:
+    due = await db.zrangebyscore(index_key, min="-inf", max=cutoff_ts, start=0, num=limit)
+    return [member.decode() if isinstance(member, bytes) else member for member in due]
+
 async def handle_saga_start(order_id: str, user_id: str, total_cost: int,
                             items: list[tuple[str, int]]):
+    now = time.time()
     state = SagaState(
         order_id=order_id, user_id=user_id, total_cost=total_cost,
-        items=items, Status=Status.WAITING, created_ts=time.time(),
+        items=items, Status=Status.WAITING, created_ts=now, updated_ts=now,
     )
-    await db.set(order_id, msgpack.encode(state))
+    async with db.pipeline(transaction=True) as pipe:
+        await pipe.set(order_id, msgpack.encode(state))
+        await pipe.zadd(SAGA_RECOVERY_INDEX, {order_id: now})
+        await pipe.execute()
 
     await messaging.publish("stock", {
         "action": "saga_subtract",
@@ -128,13 +159,17 @@ async def handle_saga_start(order_id: str, user_id: str, total_cost: int,
 # STOCK
 async def on_subtract_success(order_id: str):
     next_action = None
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: SagaState):
-        nonlocal next_action
+        nonlocal next_action, changed
 
         if state.Status in (Status.COMPLETED, Status.FAILED):
             return state, "already resolved"
 
+        changed = True
+        state.updated_ts = updated_ts
         state.stock_done = True
         state.stock_ok = True
 
@@ -152,6 +187,12 @@ async def on_subtract_success(order_id: str):
 
     await atomic_update(db, order_id, SagaState, modifier)
 
+    if changed:
+        if next_action == "complete":
+            await _untrack_saga(order_id)
+        else:
+            await _track_saga(order_id, updated_ts)
+
     if next_action == "complete":
         await messaging.publish("order", {"action": "set_completed", "order_id": order_id})
     elif next_action == "rollback_stock":
@@ -163,13 +204,17 @@ async def on_subtract_success(order_id: str):
 
 async def on_subtract_failed(order_id: str):
     next_action = None
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: SagaState):
-        nonlocal next_action
+        nonlocal next_action, changed
 
         if state.Status in (Status.COMPLETED, Status.FAILED):
             return state, "already resolved"
 
+        changed = True
+        state.updated_ts = updated_ts
         state.stock_done = True
         state.stock_ok = False
         state.error = "Stock subtract failed"
@@ -190,6 +235,12 @@ async def on_subtract_failed(order_id: str):
 
     await atomic_update(db, order_id, SagaState, modifier)
 
+    if changed:
+        if next_action == "fail":
+            await _untrack_saga(order_id)
+        else:
+            await _track_saga(order_id, updated_ts)
+
     if next_action == "rollback_payment":
         raw = await db.get(order_id)
         state = msgpack.decode(raw, type=SagaState)
@@ -202,13 +253,17 @@ async def on_subtract_failed(order_id: str):
 #PAYMENT
 async def on_pay_success(order_id: str):
     next_action = None
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: SagaState):
-        nonlocal next_action
+        nonlocal next_action, changed
 
         if state.Status in (Status.COMPLETED, Status.FAILED):
             return state, "already resolved"
 
+        changed = True
+        state.updated_ts = updated_ts
         state.payment_done = True
         state.payment_ok = True
 
@@ -226,6 +281,12 @@ async def on_pay_success(order_id: str):
 
     await atomic_update(db, order_id, SagaState, modifier)
 
+    if changed:
+        if next_action == "complete":
+            await _untrack_saga(order_id)
+        else:
+            await _track_saga(order_id, updated_ts)
+
     if next_action == "complete":
         await messaging.publish("order", {"action": "set_completed", "order_id": order_id})
     elif next_action == "rollback_payment":
@@ -237,13 +298,17 @@ async def on_pay_success(order_id: str):
 
 async def on_pay_failed(order_id: str, error: str):
     next_action = None
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: SagaState):
-        nonlocal next_action
+        nonlocal next_action, changed
 
         if state.Status in (Status.COMPLETED, Status.FAILED):
             return state, "already resolved"
 
+        changed = True
+        state.updated_ts = updated_ts
         state.payment_done = True
         state.payment_ok = False
         state.error = error
@@ -264,6 +329,12 @@ async def on_pay_failed(order_id: str, error: str):
 
     await atomic_update(db, order_id, SagaState, modifier)
 
+    if changed:
+        if next_action == "fail":
+            await _untrack_saga(order_id)
+        else:
+            await _track_saga(order_id, updated_ts)
+
     if next_action == "rollback_stock":
         await messaging.publish("stock", {"action": "saga_rollback", "order_id": order_id})
         await messaging.publish("order", {"action": "set_failed", "order_id": order_id, "error": error})
@@ -272,13 +343,17 @@ async def on_pay_failed(order_id: str, error: str):
 
 async def handle_saga_cancel(order_id: str):
     resolve_actions = []
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: SagaState):
-        nonlocal resolve_actions
+        nonlocal resolve_actions, changed
 
         if state.Status in (Status.COMPLETED, Status.FAILED):
             return state, "already resolved"
 
+        changed = True
+        state.updated_ts = updated_ts
         state.Status = Status.FAILED
         state.error = "Cancelled, we failed"
 
@@ -290,6 +365,9 @@ async def handle_saga_cancel(order_id: str):
         return state, "ok"
 
     await atomic_update(db, order_id, SagaState, modifier)
+
+    if changed:
+        await _untrack_saga(order_id)
 
     raw = await db.get(order_id)
     state = msgpack.decode(raw, type=SagaState)
@@ -387,27 +465,31 @@ async def recover_incomplete_saga():
                 now = time.time()
                 recovered = 0
 
-                async for key in db.scan_iter():
-                    if await db.type(key) != b"string":
-                        continue
+                due_order_ids = await _get_due_recovery_ids(
+                    SAGA_RECOVERY_INDEX, now - SAGA_RECOVERY_THRESHOLD
+                )
 
-                    raw = await db.get(key)
+                for oid in due_order_ids:
+                    raw = await db.get(oid)
                     if not raw:
+                        await _untrack_saga(oid)
                         continue
 
                     try:
                         state = msgpack.decode(raw, type=SagaState)
                     except Exception:
+                        await _untrack_saga(oid)
                         continue
 
                     if state.Status in (Status.COMPLETED, Status.FAILED):
+                        await _untrack_saga(oid)
                         continue
 
-                    age = now - state.created_ts if state.created_ts > 0 else float('inf')
+                    age = now - (state.updated_ts or state.created_ts or now)
                     if age < SAGA_RECOVERY_THRESHOLD:
+                        await _track_saga(oid, state.updated_ts or now)
                         continue
 
-                    oid = state.order_id
                     app.logger.info(f"Recovery [{oid}]: stuck in {state.Status} for {age:.0f}s")
 
                     if state.stock_ok:
@@ -421,8 +503,9 @@ async def recover_incomplete_saga():
 
                     state.Status = Status.FAILED
                     state.error = f"Recovered after timeout ({age:.0f}s)"
-                    state.created_ts = now
-                    await db.set(key, msgpack.encode(state))
+                    state.updated_ts = now
+                    await db.set(oid, msgpack.encode(state))
+                    await _untrack_saga(oid)
 
                     await messaging.publish("order", {
                         "action": "set_failed", "order_id": oid,
@@ -451,6 +534,7 @@ async def recover_incomplete_saga():
 
 async def handle_two_pc_start(order_id: str, user_id: str, total_cost: int, items: list[tuple[str, int]]):
     key = get_2pc_key(order_id)
+    now = time.time()
 
     state = TwoPCState(
         order_id=order_id,
@@ -465,11 +549,15 @@ async def handle_two_pc_start(order_id: str, user_id: str, total_cost: int, item
         stock_abort_ack=False,
         payment_abort_ack=False,
         error="",
-        created_ts=time.time(),
+        created_ts=now,
         decision_ts=0.0,
+        updated_ts=now,
     )
 
-    await db.set(key, msgpack.encode(state))
+    async with db.pipeline(transaction=True) as pipe:
+        await pipe.set(key, msgpack.encode(state))
+        await pipe.zadd(TWO_PC_RECOVERY_INDEX, {order_id: now})
+        await pipe.execute()
 
     # Send prepare to stock
     await messaging.publish("stock", {
@@ -490,8 +578,12 @@ async def handle_two_pc_start(order_id: str, user_id: str, total_cost: int, item
 
 async def on_vote_yes(order_id: str, who: str):
     key = get_2pc_key(order_id)
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: TwoPCState):
+        nonlocal changed
+
         if state is None:
             return None, "missing"
 
@@ -500,6 +592,8 @@ async def on_vote_yes(order_id: str, who: str):
                             TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
             return state, state
 
+        changed = True
+        state.updated_ts = updated_ts
         if who == "stock":
             state.stock_vote = "YES"
         elif who == "payment":
@@ -516,6 +610,12 @@ async def on_vote_yes(order_id: str, who: str):
     if not success or updated_state is None:
         return
 
+    if changed:
+        if updated_state.status in (TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
+            await _untrack_two_pc(order_id)
+        else:
+            await _track_two_pc(order_id, updated_ts)
+
     # If we just moved to COMMITTING → send commit
     if updated_state.status == TwoPCStatus.COMMITTING:
         await messaging.publish("stock", {
@@ -529,8 +629,12 @@ async def on_vote_yes(order_id: str, who: str):
 
 async def on_vote_no(order_id: str, who: str):
     key = get_2pc_key(order_id)
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: TwoPCState):
+        nonlocal changed
+
         if state is None:
             return None, "missing"
 
@@ -543,6 +647,8 @@ async def on_vote_no(order_id: str, who: str):
         ):
             return state, state
 
+        changed = True
+        state.updated_ts = updated_ts
         if who == "stock":
             state.stock_vote = "NO"
         elif who == "payment":
@@ -559,6 +665,12 @@ async def on_vote_no(order_id: str, who: str):
     if not success or updated_state is None:
         return
 
+    if changed:
+        if updated_state.status in (TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
+            await _untrack_two_pc(order_id)
+        else:
+            await _track_two_pc(order_id, updated_ts)
+
     # Send abort to BOTH participants
     await messaging.publish("stock", {
         "action": "stock_abort",
@@ -571,14 +683,20 @@ async def on_vote_no(order_id: str, who: str):
 
 async def on_commit_ack(order_id: str, who: str):
     key = get_2pc_key(order_id)
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: TwoPCState):
+        nonlocal changed
+
         if state is None:
             return None, "missing"
 
         if state.status != TwoPCStatus.COMMITTING:
             return state, state
 
+        changed = True
+        state.updated_ts = updated_ts
         if who == "stock":
             state.stock_commit_ack = True
         elif who == "payment":
@@ -593,6 +711,12 @@ async def on_commit_ack(order_id: str, who: str):
     if not success or updated_state is None:
         return
 
+    if changed:
+        if updated_state.status == TwoPCStatus.COMPLETED:
+            await _untrack_two_pc(order_id)
+        else:
+            await _track_two_pc(order_id, updated_ts)
+
     if updated_state.status == TwoPCStatus.COMPLETED:
         await messaging.publish("order", {
             "action": "set_completed",
@@ -601,14 +725,20 @@ async def on_commit_ack(order_id: str, who: str):
 
 async def on_abort_ack(order_id: str, who: str):
     key = get_2pc_key(order_id)
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: TwoPCState):
+        nonlocal changed
+
         if state is None:
             return None, "missing"
 
         if state.status != TwoPCStatus.ABORTING:
             return state, state
 
+        changed = True
+        state.updated_ts = updated_ts
         if who == "stock":
             state.stock_abort_ack = True
         elif who == "payment":
@@ -623,6 +753,12 @@ async def on_abort_ack(order_id: str, who: str):
     if not success or updated_state is None:
         return
 
+    if changed:
+        if updated_state.status == TwoPCStatus.FAILED:
+            await _untrack_two_pc(order_id)
+        else:
+            await _track_two_pc(order_id, updated_ts)
+
     if updated_state.status == TwoPCStatus.FAILED:
         await messaging.publish("order", {
             "action": "set_failed",
@@ -632,8 +768,12 @@ async def on_abort_ack(order_id: str, who: str):
 
 async def handle_two_pc_cancel(order_id: str):
     key = get_2pc_key(order_id)
+    updated_ts = time.time()
+    changed = False
 
     def modifier(state: TwoPCState):
+        nonlocal changed
+
         if state is None:
             return None, "missing"
 
@@ -657,12 +797,17 @@ async def handle_two_pc_cancel(order_id: str):
             state.status = TwoPCStatus.ABORTING
             state.decision_ts = time.time()
             state.error = "Cancelled, we failed"
+            state.updated_ts = updated_ts
+            changed = True
 
         return state, state
 
     success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
     if not success or updated_state is None:
         return
+
+    if changed:
+        await _track_two_pc(order_id, updated_ts)
 
     # If we moved to ABORTING → send aborts
     if updated_state.status == TwoPCStatus.ABORTING:
@@ -676,42 +821,75 @@ async def handle_two_pc_cancel(order_id: str):
         })
 
 async def recover_incomplete_2pc():
+    await asyncio.sleep(5)
+
     while not messaging.is_shutting_down():
         try:
             now = time.time()
 
-            async for key in db.scan_iter(match="2pc:*"):
-                raw = await db.get(key)
-                if not raw:
-                    continue
+            lock = db.lock("orch_2pc_recovery_lock", timeout=30)
+            if not await lock.acquire(blocking=False):
+                await asyncio.sleep(10)
+                continue
 
-                state = msgpack.decode(raw, type=TwoPCState)
-                age = now - (state.decision_ts or state.created_ts or now)
+            try:
+                due_order_ids = await _get_due_recovery_ids(
+                    TWO_PC_RECOVERY_INDEX, now - TWO_PC_RECOVERY_THRESHOLD
+                )
 
-                if state.status in (TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
-                    continue
+                for order_id in due_order_ids:
+                    key = get_2pc_key(order_id)
+                    raw = await db.get(key)
+                    if not raw:
+                        await _untrack_two_pc(order_id)
+                        continue
 
-                if age < TWO_PC_RECOVERY_THRESHOLD:
-                    continue
+                    try:
+                        state = msgpack.decode(raw, type=TwoPCState)
+                    except Exception:
+                        await _untrack_two_pc(order_id)
+                        continue
 
-                order_id = state.order_id
+                    if state.status in (TwoPCStatus.COMPLETED, TwoPCStatus.FAILED):
+                        await _untrack_two_pc(order_id)
+                        continue
 
-                # Case 1: stuck in PREPARING -> force ABORT
-                if state.status == TwoPCStatus.PREPARING:
-                    def modifier(current: TwoPCState):
-                        if current is None:
-                            return None, "missing"
+                    age = now - (state.updated_ts or state.decision_ts or state.created_ts or now)
 
-                        if current.status != TwoPCStatus.PREPARING:
-                            return current, "ignore"
+                    if age < TWO_PC_RECOVERY_THRESHOLD:
+                        await _track_two_pc(order_id, state.updated_ts or now)
+                        continue
 
-                        current.status = TwoPCStatus.ABORTING
-                        current.decision_ts = time.time()
-                        current.error = f"Recovered after timeout ({age:.0f}s)"
-                        return current, current
+                    # Case 1: stuck in PREPARING -> force ABORT
+                    if state.status == TwoPCStatus.PREPARING:
+                        def modifier(current: TwoPCState):
+                            if current is None:
+                                return None, "missing"
 
-                    success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
-                    if success and updated_state is not None and updated_state.status == TwoPCStatus.ABORTING:
+                            if current.status != TwoPCStatus.PREPARING:
+                                return current, "ignore"
+
+                            current.status = TwoPCStatus.ABORTING
+                            current.decision_ts = time.time()
+                            current.updated_ts = time.time()
+                            current.error = f"Recovered after timeout ({age:.0f}s)"
+                            return current, current
+
+                        success, updated_state = await atomic_update(db, key, TwoPCState, modifier)
+                        if success and updated_state is not None and updated_state.status == TwoPCStatus.ABORTING:
+                            await _track_two_pc(order_id, updated_state.updated_ts or now)
+                            await messaging.publish("stock", {
+                                "action": "stock_abort",
+                                "order_id": order_id,
+                            })
+                            await messaging.publish("payment", {
+                                "action": "payment_abort",
+                                "order_id": order_id,
+                            })
+
+                    # Case 2: stuck in ABORTING -> resend abort
+                    elif state.status == TwoPCStatus.ABORTING:
+                        await _track_two_pc(order_id, state.updated_ts or now)
                         await messaging.publish("stock", {
                             "action": "stock_abort",
                             "order_id": order_id,
@@ -721,27 +899,23 @@ async def recover_incomplete_2pc():
                             "order_id": order_id,
                         })
 
-                # Case 2: stuck in ABORTING -> resend abort
-                elif state.status == TwoPCStatus.ABORTING:
-                    await messaging.publish("stock", {
-                        "action": "stock_abort",
-                        "order_id": order_id,
-                    })
-                    await messaging.publish("payment", {
-                        "action": "payment_abort",
-                        "order_id": order_id,
-                    })
+                    # Case 3: stuck in COMMITTING -> resend commit
+                    elif state.status == TwoPCStatus.COMMITTING:
+                        await _track_two_pc(order_id, state.updated_ts or now)
+                        await messaging.publish("stock", {
+                            "action": "stock_commit",
+                            "order_id": order_id,
+                        })
+                        await messaging.publish("payment", {
+                            "action": "payment_commit",
+                            "order_id": order_id,
+                        })
 
-                # Case 3: stuck in COMMITTING -> resend commit
-                elif state.status == TwoPCStatus.COMMITTING:
-                    await messaging.publish("stock", {
-                        "action": "stock_commit",
-                        "order_id": order_id,
-                    })
-                    await messaging.publish("payment", {
-                        "action": "payment_commit",
-                        "order_id": order_id,
-                    })
+            finally:
+                try:
+                    await lock.release()
+                except redis_exceptions.LockError:
+                    pass
 
         except asyncio.CancelledError:
             raise

@@ -17,14 +17,17 @@ for t in tests:
     print("========================")
 
     result = subprocess.run(
-        ["python", f"additional/{t}"],
+        ["python", f"{t}"],
         capture_output=True,
         text=True
     )
 
     print(result.stdout)
+    print(result.stderr)
 
-    if "FAIL" in result.stdout:
+    if result.stdout == "" or result.stdout == "Resetting system state\n":
+        print(f"Error running test {t}")
+    elif "FAIL" in result.stdout:
         print(t, "FAILED")
     else:
         print(t, "PASSED")
